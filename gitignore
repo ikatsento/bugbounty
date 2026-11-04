@@ -1,0 +1,28 @@
+# Reports output
+reports/
+*.md.bak
+*.json.bak
+nuclei_output.jsonl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Env files — NEVER commit these
+.env
+.env.local
+*.env
