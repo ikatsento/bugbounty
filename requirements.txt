@@ -1,14 +1,4 @@
-# bounty_recon.py v2.0.0
-# Install: pip3 install -r requirements.txt
-
-# Required
-httpx>=0.27.0        # HTTP client (async-capable, better than requests)
-dnspython>=2.6.0     # DNS resolution and query
-rich>=13.0.0         # Pretty terminal output with colors
-
-# Optional — enhanced features
-# typer>=0.12.0      # Alternative CLI (not needed — argparse used)
-
-# External tools (install separately, not via pip)
-# nuclei   → go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-# subfinder→ go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+httpx>=0.27.0
+dnspython>=2.6.0
+rich>=13.0.0
+playwright>=1.40.0
