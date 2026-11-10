@@ -29,5 +29,5 @@ A powerful, multi-threaded single/multi-module Python & Docker tool designed for
 
 1. **Clone the repository:**
    ```bash
-   git clone [https://github.com/ikatsento/bounty_recon.git](https://github.com/ikatsento/bounty_recon.git)
+   git clone https://github.com/ikatsento/bounty_recon.git
    cd bounty_recon
