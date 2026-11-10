@@ -1,3 +1,9 @@
+
+---
+
+### 2. `.gitignore`
+
+```text
 # Reports output
 reports/
 *.md.bak
