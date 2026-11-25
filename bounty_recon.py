@@ -307,9 +307,36 @@ SENSITIVE_PATHS = [
     "/.DS_Store","/.htaccess","/.htpasswd",
 ]
 
+# Public/benign files that live in SENSITIVE_PATHS only as "worth reading", NOT
+# as vulnerabilities — reporting these as High is pure noise to a triager.
+BENIGN_PATHS = {
+    "/robots.txt", "/sitemap.xml", "/crossdomain.xml", "/clientaccesspolicy.xml",
+    "/.well-known/security.txt", "/.well-known/change-password",
+    "/.well-known/openid-configuration", "/.well-known/jwks.json",
+}
+# Substrings that mark a genuinely dangerous exposure (secrets, VCS, DB, debug).
+_CRITICAL_MARKERS = (".env", ".git/", ".htpasswd", "backup", "dump.sql", ".sqlite",
+                     "db_backup", "id_rsa", "credentials", "/adminer", "/phpmyadmin")
+_HIGH_MARKERS     = ("/metrics", "/actuator", "debug", "/env", "swagger", "openapi",
+                     "/.ds_store", "/config", "/.htaccess", "server-status",
+                     "/graphql", "pprof", "/rest/")
+
+def endpoint_severity(url_or_path: str) -> str:
+    """Grade a discovered endpoint instead of calling everything High.
+    Benign public files → Info; secrets/VCS/DB → Critical; metrics/debug/config
+    /admin panels → High; everything else that's reachable+non-HTML → Medium."""
+    p = urlparse(url_or_path).path.lower() if "://" in url_or_path else url_or_path.lower()
+    if p in BENIGN_PATHS:
+        return "Info"
+    if any(m in p for m in _CRITICAL_MARKERS):
+        return "Critical"
+    if any(m in p for m in _HIGH_MARKERS):
+        return "High"
+    return "Medium"
+
 # ── Security headers ──────────────────────────────────────────────────────────
 REQUIRED_HEADERS = {
-    "content-security-policy":       ("High",   "CSP missing — XSS risk increased"),
+    "content-security-policy":       ("Medium", "CSP missing — XSS risk increased"),
     "x-content-type-options":        ("Low",    "MIME-type sniffing enabled"),
     "x-frame-options":               ("Medium", "Clickjacking possible"),
     "strict-transport-security":     ("Medium", "HSTS missing — MITM risk"),
@@ -2484,15 +2511,39 @@ def main():
     for url in scan_urls[:5]:
         ep_f, ep_p = sweep_endpoints(url)
         for f in ep_f:
-            all_findings.append({"severity":"High","category":"exposure","title":f"Sensitive endpoint: {f['url'].split('/')[-1] or '(root)'}","url":f["url"],"command":f["command"],"evidence":f"HTTP 200 | {f['content_type']} | {f['snippet'][:100]}","remediation":"Restrict to internal or add auth"})
+            sev = endpoint_severity(f["url"])
+            leaf = f["url"].split("/")[-1] or "(root)"
+            label = "Reachable endpoint" if sev == "Info" else "Sensitive endpoint"
+            rem = ("Public file — informational only; no action usually needed."
+                   if sev == "Info" else "Restrict to internal, require auth, or remove from webroot.")
+            all_findings.append({"severity":sev,"category":"exposure",
+                "title":f"{label}: {leaf}","url":f["url"],"command":f["command"],
+                "evidence":f"HTTP 200 | {f['content_type']} | {f['snippet'][:100]}","remediation":rem})
         all_passed.extend(ep_p)
 
     # 6. Security headers + cookies
     console.print("\n[bold]6. Security Headers & Cookie Audit[/bold]" if HAS_RICH else "\n6. Headers + Cookies")
     for url in scan_urls[:5]:
         hf, hp = check_headers(url)
-        for f in hf:
-            all_findings.append({"severity":f["severity"],"category":"headers","title":f"Header: {f['header']}","url":f.get("url",url),"command":f.get("command",""),"evidence":f.get("evidence",""),"remediation":f.get("remediation","")})
+        # Consolidate all *missing* security headers for this host into ONE finding
+        # (a triager does not want 6-9 separate Low rows per host). Specific CSP
+        # directive issues and server-version leaks stay as their own findings.
+        missing = [f for f in hf if f["header"] in REQUIRED_HEADERS]
+        other   = [f for f in hf if f["header"] not in REQUIRED_HEADERS]
+        if missing:
+            names = [f["header"] for f in missing]
+            grp_sev = "Medium" if any(f["severity"] == "Medium" for f in missing) else "Low"
+            all_findings.append({"severity":grp_sev,"category":"headers",
+                "title":f"Missing security headers ({len(names)})","url":url,
+                "command":f'curl -sI "{url}"',
+                "evidence":"Absent: " + ", ".join(names),
+                "remediation":"Add the headers at the edge/CDN. Note: on most bug-bounty programs "
+                              "missing headers are informational and not independently rewarded."})
+        for f in other:
+            all_findings.append({"severity":f["severity"],"category":"headers",
+                "title":f"Header: {f['header']}","url":f.get("url",url),
+                "command":f.get("command",""),"evidence":f.get("evidence",""),
+                "remediation":f.get("remediation","")})
         all_passed.extend(hp)
         try:
             _, resp_hdrs, _ = http_get(url, timeout=8)
