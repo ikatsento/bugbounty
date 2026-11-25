@@ -40,6 +40,14 @@ live text/severity filtering, collapsible findings with copy-to-clipboard, and
 foldable recon sections (subdomains, live hosts, tech, params, WAF, AI plan). It's
 a single self-contained file — open it anywhere, no server, no external assets.
 
+**v4.2 — fewer false positives + inline verification.** The CVE fingerprinter now
+rejects catch-all 404/error pages, SPA indexes, path-echo matches, and substring
+bleed (e.g. `nable` in `enable`), so it only flags a *live product page*. SSTI
+uses a randomized differential (random `a*b` + baseline + reflected-literal check)
+instead of a fixed `{{7*7}}`→`49`. And every actionable finding now prints its
+**copy-paste verification commands** (`↳ verify:` lines) right in the terminal —
+what to run and how, per class (SSRF, XSS, IDOR, SSTI, CORS, CSP, …).
+
 ---
 
 ## Repository Structure

