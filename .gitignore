@@ -25,3 +25,10 @@ secrets.*
 # OS
 .DS_Store
 Thumbs.db
+
+# scan outputs accidentally written to repo root
+*_20[0-9][0-9][0-9][0-9][0-9][0-9]_*.md
+*_20[0-9][0-9][0-9][0-9][0-9][0-9]_*.json
+*_20[0-9][0-9][0-9][0-9][0-9][0-9]_*.html
+*.patch
+poc/
