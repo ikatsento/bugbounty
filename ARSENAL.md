@@ -30,14 +30,24 @@ the top hunters actually use:
 **Write-ups / what's actually being found**
 - Pentester Land — https://pentester.land/writeups/ (indexed bug bounty writeups)
 - HackerOne Hacktivity — https://hackerone.com/hacktivity (disclosed reports)
-- Reddit — r/bugbounty, r/netsec
-- Intigriti / YesWeHack / Bugcrowd blogs (new techniques, VRT)
+- Reddit — r/bugbounty, r/netsec (threads + weekly "what did you find")
+- Intigriti / YesWeHack / Bugcrowd blogs (new techniques, VRT changes)
 
-**Core tooling (ProjectDiscovery + tomnomnom + friends)**
-- ProjectDiscovery: `subfinder`, `httpx`, `nuclei`, `naabu`, `katana`, `dnsx`, `interactsh`
-- tomnomnom: `gf`, `waybackurls`, `anew`, `qsreplace`, `unfurl`, `httprobe`
-- `lc/gau`, `ffuf`, `hahwul/dalfox`, `s0md3v/Arjun`, `devanshbatham/ParamSpider`
-- `trufflesecurity/trufflehog`, `gitleaks`, `owasp-amass/amass`, `ghauri`, `sqlmap`
+**Cutting-edge research (where the top-10 techniques come from)**
+- PortSwigger Research + *Top 10 Web Hacking Techniques* (annual) — https://portswigger.net/research
+- James Kettle (albinowax) — request smuggling / desync / cache
+- Assetnote research — https://blog.assetnote.io (infra, 0-days, wordlists)
+- Orange Tsai, Sam Curry (samcurry.net), Gareth Heyes (DOM/XSS), @intigriti bug-bytes
+
+**People / newsletters / podcasts (what hunters actually follow)**
+- *Critical Thinking – Bug Bounty Podcast* (Justin Gardner / Rhynorater) — weekly technique deep-dives
+- NahamSec (YouTube + `Resources-for-Beginner-Bug-Bounty-Hunters`)
+- Jason Haddix — TBHM v5, recon methodology
+- Intigriti **Bug Bytes** newsletter · tldrsec.com · hackerone.com/disclosed
+- Godfather Orwa, Jhaddix, Stök, InsiderPhD, LiveOverflow (YouTube)
+
+**Tool catalog:** the full, categorized, de-duplicated list of ~400 tools lives in
+[`TOOLS.md`](./TOOLS.md). Below is only the *proven-pipeline* subset.
 
 ---
 
@@ -79,6 +89,42 @@ subfinder -d target.com -silent | httpx -silent | nuclei -t http/takeovers/
 # Feed everything into this repo's scanner for scoring + exploitation plans
 python3 bounty_recon.py -t target.com --profile safe --ai-triage --html --out-dir ./reports
 ```
+
+### The 2025 stack (what the pipelines above modernize to)
+
+```bash
+# Full passive asset → live → screenshots, all deduped with anew
+subfinder -d target.com -all -silent | dnsx -silent | anew hosts.txt
+cat hosts.txt | httpx -silent -sc -title -tech-detect -o live.txt
+cat live.txt | cut -d' ' -f1 | gowitness scan file -f -   # visual triage grid
+
+# Modern URL harvest: archives (waymore) + live crawl (katana), then declutter
+waymore -i target.com -mode U -oU way.txt
+katana -u live.txt -jc -kf all -d 3 -silent | anew way.txt
+cat way.txt | uro | anew urls.txt      # uro kills 90% of near-dup noise
+
+# Route URLs to the right test with gf, confirm with a UNIQUE marker only
+cat urls.txt | gf redirect | qsreplace 'https://oob.example/' | httpx -silent -mr 'oob.example'
+cat urls.txt | gf ssrf     | qsreplace 'http://COLLAB.oast.pro' # watch interactsh
+cat urls.txt | gf xss      | dalfox pipe --skip-bav --silence -o dalfox.txt
+
+# JS: jsluice reads JS by AST (far fewer false endpoints than regex)
+cat urls.txt | grep '\.js$' | httpx -silent | xargs -I{} sh -c 'curl -s {} | jsluice urls' | anew js-endpoints.txt
+cat urls.txt | grep '\.js$' | httpx -silent | xargs -I{} sh -c 'curl -s {} | jsluice secrets'
+
+# nuclei: templates + DAST fuzzing in one run, OAST on, only real severities
+nuclei -l live.txt -severity critical,high,medium -itags cve,misconfig,exposure \
+  -dast -iserver interactsh -stats -o nuclei.txt
+
+# Continuous recon: diff new subs/JS and ping chat (set-and-forget)
+subfinder -d target.com -silent | anew subs.txt | notify -silent
+```
+
+> **Why these over the classics?** `waymore` pulls more archives than `waybackurls`,
+> `uro` removes duplicate-shaped URLs so you fuzz 10× fewer dead ends, `jsluice`
+> parses JS instead of regex-guessing (massively fewer bogus endpoints), and
+> `nuclei -dast` adds active fuzzing to template matching. Every signal still
+> needs OOB/marker confirmation before you believe it.
 
 ---
 
@@ -209,6 +255,27 @@ Most engagements succeed at step 2 (WAF and origin disagree on what's "valid").
 ```
 gf xss | ssrf | idor | sqli | redirect | lfi | rce | ssti | debug_logic | secrets | cors | upload-fields
 ```
+
+---
+
+## 4b. Modern technique radar (PortSwigger Top-10 themes, 2024–2025)
+
+Where the fresh, less-saturated bugs are. These are the themes that dominated the
+last two annual top-10 lists — hunt them where frameworks are new.
+
+| Theme | What to look for | Signal |
+|---|---|---|
+| **Parser differentials** | Front-end and back-end (or two libraries) disagree on the same input — URL, JSON, multipart, XML | Same request, two different interpretations → auth/path bypass, smuggling |
+| **Web Cache Deception** | `/account.css`, `/profile/avatar.js`, path-confusion suffixes that the cache stores but the app treats as the real page | Private response served to the next visitor |
+| **Unicode / normalization gaps** | `ı`/`I`, full-width, NFKC folding applied *after* an allow/deny check | `admin` vs `Admın`, host/email normalization → takeover |
+| **OAuth cookie tossing / state abuse** | Sibling-subdomain can set a cookie the parent trusts; missing/replayable `state`; lax `redirect_uri` | Auth-code theft → ATO |
+| **SSRF without obvious output** | Blind SSRF where timing / error-shape / second-order fetch reveals internal reachability | OOB callback + response-diff, not a reflected body |
+| **ORM / query leakage** | Over-broad ORM filters, GraphQL field-level gaps, mass-assignment into query builders | Extra fields in responses, `node()` reaching other tenants |
+| **Error-based code injection** | Template/expression engines that only reveal injection through error messages | `{{7*7}}`/`${7*7}` differences surfaced in stack traces |
+
+Pair with the A→B cluster habit: a parser differential next to a cache often
+chains into *stored* cache poisoning; a normalization gap next to OAuth often
+chains into ATO. Build the chain, then report it.
 
 ---
 

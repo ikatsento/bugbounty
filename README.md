@@ -35,6 +35,11 @@ python3 bounty_recon.py -t target.com --profile safe --ai-triage --ai-plan
 Everything is now **one file** — `bounty_recon.py`. The old `claude_hunter.py`
 and `artemis_triage.py` have been merged into it (`--ai-triage` / `--ai-plan`).
 
+`--html` now writes an **interactive dashboard** (v4.1): severity donut, stat tiles,
+live text/severity filtering, collapsible findings with copy-to-clipboard, and
+foldable recon sections (subdomains, live hosts, tech, params, WAF, AI plan). It's
+a single self-contained file — open it anywhere, no server, no external assets.
+
 ---
 
 ## Repository Structure
@@ -42,7 +47,8 @@ and `artemis_triage.py` have been merged into it (`--ai-triage` / `--ai-plan`).
 ```
 bugbounty/
 ├── bounty_recon.py          ← the whole tool (recon + scan + AI triage + report)
-├── ARSENAL.md               ← payloads, oneliners, WAF bypass, submission rules
+├── ARSENAL.md               ← payloads, oneliners, WAF bypass, technique radar, submission rules
+├── TOOLS.md                 ← ~400-tool catalog by phase + one-shot install
 ├── requirements.txt
 ├── Payloads/                ← payload library
 │   ├── xss.txt   ssti.txt   sqli.txt   ssrf.txt
@@ -132,6 +138,10 @@ go install -v github.com/ffuf/ffuf/v2@latest
 ```
 
 Pair with Burp Suite / Caido for manual testing and `interactsh-client` for OOB.
+
+For the **full stack** (ProjectDiscovery + tomnomnom + per-class exploit tools,
+~400 tools by category) and a one-shot installer, see **[`TOOLS.md`](./TOOLS.md)**.
+For payloads, modern oneliners and the technique radar, see **[`ARSENAL.md`](./ARSENAL.md)**.
 
 ---
 

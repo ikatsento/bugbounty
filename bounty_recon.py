@@ -131,7 +131,7 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-VERSION  = "4.0.0"
+VERSION  = "4.1.0"
 TIMEOUT  = 12
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 BROWSER_HEADERS = {
@@ -2329,74 +2329,315 @@ def dedup_findings(findings: list) -> list:
     return out
 
 def generate_html(result: ScanResult, out_path: Path):
-    """Self-contained HTML report (no external assets) with severity colouring."""
-    import html as _html
-    colors = {"Critical":"#d7263d","High":"#f46036","Medium":"#e2b100",
-              "Low":"#2e86de","Info":"#8395a7"}
-    sev_counts = {}
-    for f in result.findings:
-        s = f.get("severity","Info"); sev_counts[s] = sev_counts.get(s,0)+1
-    sorted_f = sorted(result.findings, key=lambda f: SEV_ORDER.get(f.get("severity","Info"),4))
+    """Self-contained, interactive HTML dashboard (no external assets).
 
-    def esc(x): return _html.escape(str(x or ""))
-    rows = []
+    Severity donut, stat tiles, live filter/search, collapsible finding cards
+    with copy buttons, and recon sections (subdomains / hosts / tech / params /
+    WAF / AI attack plan). Pure inline CSS + vanilla JS — opens anywhere offline.
+    """
+    import html as _html
+    import json as _json
+
+    C = {"Critical": "#ff4d6d", "High": "#ff8c42", "Medium": "#ffd23f",
+         "Low": "#4da6ff", "Info": "#8b95a7"}
+
+    def esc(x):
+        return _html.escape(str(x if x is not None else ""))
+
+    sev_counts = {s: 0 for s in ["Critical", "High", "Medium", "Low", "Info"]}
+    for f in result.findings:
+        s = f.get("severity", "Info")
+        sev_counts[s] = sev_counts.get(s, 0) + 1
+    total = len(result.findings)
+    actionable = sev_counts["Critical"] + sev_counts["High"] + sev_counts["Medium"]
+
+    sorted_f = sorted(result.findings,
+                      key=lambda f: SEV_ORDER.get(f.get("severity", "Info"), 4))
+
+    # ── severity donut (inline SVG, conic via stroke-dasharray) ──────────────
+    R, CIRC = 54, 2 * 3.14159265 * 54
+    donut_segs, offset = [], 0.0
+    for s in ["Critical", "High", "Medium", "Low", "Info"]:
+        n = sev_counts[s]
+        if n == 0 or total == 0:
+            continue
+        frac = n / total
+        seg = frac * CIRC
+        donut_segs.append(
+            f'<circle r="{R}" cx="80" cy="80" fill="none" stroke="{C[s]}" '
+            f'stroke-width="22" stroke-dasharray="{seg:.2f} {CIRC - seg:.2f}" '
+            f'stroke-dashoffset="{-offset:.2f}" transform="rotate(-90 80 80)">'
+            f'<title>{s}: {n}</title></circle>')
+        offset += seg
+    donut = (f'<svg viewBox="0 0 160 160" width="160" height="160" class="donut">'
+             f'<circle r="{R}" cx="80" cy="80" fill="none" stroke="#242a36" stroke-width="22"/>'
+             f'{"".join(donut_segs)}'
+             f'<text x="80" y="74" text-anchor="middle" class="donut-num">{total}</text>'
+             f'<text x="80" y="94" text-anchor="middle" class="donut-lab">findings</text>'
+             f'</svg>')
+
+    legend = "".join(
+        f'<button class="leg" data-sev="{s}"><span class="dot" style="background:{C[s]}"></span>'
+        f'{s}<b>{sev_counts[s]}</b></button>'
+        for s in ["Critical", "High", "Medium", "Low", "Info"])
+
+    # ── stat tiles ───────────────────────────────────────────────────────────
+    def tile(num, lab, accent="#6ea8fe"):
+        return (f'<div class="tile"><div class="tile-n" style="color:{accent}">{num}</div>'
+                f'<div class="tile-l">{esc(lab)}</div></div>')
+    tiles = "".join([
+        tile(len(result.subdomains), "Subdomains", "#6ea8fe"),
+        tile(len(result.live_hosts), "Live hosts", "#4dd4ac"),
+        tile(actionable, "Actionable", "#ff8c42"),
+        tile(len(result.parameters), "Params mined", "#c792ea"),
+        tile(len(result.passed), "Checks passed", "#4dd4ac"),
+    ])
+
+    # ── finding cards ─────────────────────────────────────────────────────────
+    cards = []
     for i, f in enumerate(sorted_f, 1):
-        sev = f.get("severity","Info")
-        title = f.get("title") or f.get("detail") or f.get("header","") or "Finding"
-        url = f.get("url") or f.get("host","")
-        ev = f.get("evidence") or f.get("snippet") or f.get("detail","")
-        cmd = f.get("command",""); rem = f.get("remediation","")
+        sev = f.get("severity", "Info")
+        title = f.get("title") or f.get("detail") or f.get("header", "") or "Finding"
+        url = f.get("url") or f.get("host", "")
+        ev = f.get("evidence") or f.get("snippet") or f.get("detail", "")
+        cmd = f.get("command", "")
+        rem = f.get("remediation", "")
+        cat = f.get("category", "") or f.get("type", "")
         exp = f.get("exploit") or {}
+        blob = esc(" ".join(str(x) for x in [title, url, ev, cat, sev]).lower())
+
         exp_html = ""
         if exp:
-            steps = "".join(f"<li>{esc(s)}</li>" for s in exp.get("steps",[]))
-            pocf = f'<div class="rem">📎 PoC file: <code>{esc(f.get("poc_file",""))}</code></div>' if f.get("poc_file") else ""
-            exp_html = (f'<div class="exp"><b>{esc(VERDICT_LABEL.get(exp.get("verdict",""),""))}</b>'
-                        f' — {esc(exp.get("impact",""))}<ol>{steps}</ol>{pocf}</div>')
-        rows.append(f"""<div class="card" data-sev="{esc(sev)}">
-  <div class="cardhead"><span class="pill" style="background:{colors.get(sev,'#888')}">{esc(sev)}</span>
-    <span class="num">#{i}</span><span class="cat">{esc(f.get('category',''))}</span></div>
-  <h3>{esc(title)}</h3>
-  {f'<div class="target">{esc(url)}</div>' if url else ''}
-  {f'<pre class="ev">{esc(ev[:600])}</pre>' if ev else ''}
-  {f'<pre class="cmd">{esc(cmd)}</pre>' if cmd else ''}
-  {exp_html}
-  {f'<div class="rem"><b>Remediation:</b> {esc(rem)}</div>' if rem else ''}
-</div>""")
+            steps = "".join(f"<li>{esc(s)}</li>" for s in exp.get("steps", []))
+            pocf = (f'<div class="kv">📎 PoC file <code>{esc(f.get("poc_file",""))}</code></div>'
+                    if f.get("poc_file") else "")
+            exp_html = (
+                f'<div class="exp"><span class="verdict">'
+                f'{esc(VERDICT_LABEL.get(exp.get("verdict",""),""))}</span> '
+                f'{esc(exp.get("impact",""))}'
+                f'{f"<ol>{steps}</ol>" if steps else ""}{pocf}</div>')
 
-    chips = "".join(
-        f'<span class="chip" style="border-color:{colors.get(s)}"><b style="color:{colors.get(s)}">{sev_counts.get(s,0)}</b> {s}</span>'
-        for s in ["Critical","High","Medium","Low","Info"])
+        body = "".join([
+            f'<div class="target">{esc(url)}'
+            f'<button class="copy" data-copy="{esc(url)}">copy</button></div>' if url else "",
+            f'<pre class="ev">{esc(ev[:800])}</pre>' if ev else "",
+            (f'<div class="code"><pre>{esc(cmd)}</pre>'
+             f'<button class="copy" data-copy="{esc(cmd)}">copy</button></div>') if cmd else "",
+            exp_html,
+            f'<div class="kv"><b>Fix</b> {esc(rem)}</div>' if rem else "",
+        ])
+
+        cards.append(
+            f'<details class="card" data-sev="{esc(sev)}" data-blob="{blob}" open>'
+            f'<summary><span class="pill" style="background:{C.get(sev,"#888")}">{esc(sev)}</span>'
+            f'<span class="ctitle">{esc(title)}</span>'
+            f'{f"<span class=cat>{esc(cat)}</span>" if cat else ""}'
+            f'<span class="idx">#{i}</span></summary>'
+            f'<div class="cbody">{body}</div></details>')
+
+    # ── recon sections (collapsible) ───────────────────────────────────────────
+    sections = []
+
+    if result.waf_detected:
+        rows = []
+        for host, waf in result.waf_detected.items():
+            if waf.get("vendor"):
+                tips = "".join(f"<li>{esc(t)}</li>" for t in waf.get("bypass_tips", [])[:3])
+                rows.append(f'<div class="kv"><code>{esc(host)}</code> → '
+                            f'<b>{esc(waf["vendor"])}</b> '
+                            f'<span class="muted">(conf {esc(waf.get("confidence",""))})</span>'
+                            f'{f"<ul>{tips}</ul>" if tips else ""}</div>')
+        if rows:
+            sections.append(("🛡️ WAF detection", "".join(rows)))
+
+    if result.live_hosts:
+        rows = ['<table><tr><th>URL</th><th>Status</th><th>Server</th></tr>']
+        for h in result.live_hosts:
+            rows.append(f'<tr><td><a href="{esc(h["url"])}" target="_blank" rel="noopener">'
+                        f'{esc(h["url"])}</a></td><td>{esc(h.get("status","?"))}</td>'
+                        f'<td><code>{esc(h.get("server","?"))}</code></td></tr>')
+        rows.append("</table>")
+        sections.append((f"🌐 Live hosts ({len(result.live_hosts)})", "".join(rows)))
+
+    if result.technologies:
+        rows = []
+        for host, techs in result.technologies.items():
+            chips = "".join(f'<span class="tech">{esc(t)}</span>' for t in techs)
+            rows.append(f'<div class="kv"><code>{esc(host)}</code> {chips}</div>')
+        sections.append(("🧬 Technologies", "".join(rows)))
+
+    if result.subdomains:
+        shown = result.subdomains[:300]
+        chips = "".join(f'<span class="sub">{esc(s)}</span>' for s in shown)
+        extra = (f'<div class="muted">… and {len(result.subdomains)-300} more</div>'
+                 if len(result.subdomains) > 300 else "")
+        sections.append((f"🔎 Subdomains ({len(result.subdomains)})",
+                         f'<div class="subwrap">{chips}</div>{extra}'))
+
+    if result.parameters:
+        params = " ".join(result.parameters[:200])
+        sections.append((f"🧩 Mined parameters ({len(result.parameters)})",
+                         f'<div class="code"><pre>{esc(params)}</pre>'
+                         f'<button class="copy" data-copy="{esc(params)}">copy</button></div>'
+                         f'<div class="muted">Feed to ffuf / Arjun / param-miner as a wordlist.</div>'))
+
+    if result.ai_plan:
+        sections.append(("🤖 AI attack plan",
+                         f'<pre class="plan">{esc(result.ai_plan)}</pre>'))
+
+    sections_html = "".join(
+        f'<details class="sec"><summary>{t}</summary><div class="secbody">{h}</div></details>'
+        for t, h in sections)
+
+    findings_html = ("".join(cards) if cards
+                     else '<div class="empty">✅ No findings surfaced in this run.</div>')
 
     doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Recon Report — {esc(result.target)}</title>
+<title>Recon · {esc(result.target)}</title>
 <style>
-:root{{color-scheme:light dark}}
 *{{box-sizing:border-box}}
-body{{font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#0f1115;color:#e6e6e6}}
-header{{padding:24px 20px;background:#171a21;border-bottom:1px solid #262b36}}
-h1{{margin:0 0 4px;font-size:20px}} .meta{{color:#8b93a1;font-size:13px}}
-.wrap{{max-width:980px;margin:0 auto;padding:20px}}
-.chips{{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}}
-.chip{{border:1px solid #333;border-radius:20px;padding:4px 12px;font-size:13px;background:#171a21}}
-.card{{background:#171a21;border:1px solid #262b36;border-radius:10px;padding:16px;margin:12px 0}}
-.cardhead{{display:flex;gap:10px;align-items:center;font-size:12px}}
-.pill{{color:#fff;border-radius:4px;padding:2px 8px;font-weight:600}}
-.num{{color:#5b6472}} .cat{{color:#8b93a1;margin-left:auto}}
-h3{{margin:8px 0;font-size:16px}}
-.target{{color:#6fb3ff;font-family:ui-monospace,monospace;font-size:13px;word-break:break-all}}
-pre{{background:#0f1115;border:1px solid #262b36;border-radius:6px;padding:10px;overflow:auto;font-size:12.5px;white-space:pre-wrap;word-break:break-word}}
-.cmd{{color:#9ae6b4}} .rem{{margin-top:8px;color:#cbd3df;font-size:13.5px}}
-.exp{{margin-top:10px;padding:10px;border-left:3px solid #d7263d;background:#1d1420;border-radius:6px;font-size:13.5px}}
-.exp ol{{margin:6px 0 0;padding-left:20px}} .exp li{{margin:3px 0}} .exp code{{color:#9ae6b4}}
-footer{{color:#5b6472;font-size:12px;padding:20px;text-align:center}}
+:root{{
+  --bg:#0b0e14; --bg2:#121722; --card:#151b27; --line:#232c3d; --ink:#e7ecf3;
+  --mut:#8b95a7; --accent:#6ea8fe; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+}}
+@media(prefers-color-scheme:light){{:root{{
+  --bg:#f4f6fb; --bg2:#fff; --card:#fff; --line:#e3e8f0; --ink:#1b2230; --mut:#5b667a;
+}}}}
+html{{scroll-behavior:smooth}}
+body{{margin:0;font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  background:var(--bg);color:var(--ink);-webkit-font-smoothing:antialiased}}
+a{{color:var(--accent);text-decoration:none}}a:hover{{text-decoration:underline}}
+.wrap{{max-width:1120px;margin:0 auto;padding:0 20px}}
+header{{background:linear-gradient(135deg,#1a2234,#0b0e14);border-bottom:1px solid var(--line);
+  padding:30px 0 26px}}
+@media(prefers-color-scheme:light){{header{{background:linear-gradient(135deg,#eaf0fb,#fff)}}}}
+.brand{{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:700}}
+h1{{margin:6px 0 4px;font-size:27px;letter-spacing:-.02em;word-break:break-all}}
+.meta{{color:var(--mut);font-size:13px}}
+.hero{{display:flex;gap:28px;align-items:center;flex-wrap:wrap;margin-top:22px}}
+.donut-num{{fill:var(--ink);font:700 30px var(--mono)}}
+.donut-lab{{fill:var(--mut);font:11px sans-serif;letter-spacing:.08em}}
+.legend{{display:flex;flex-direction:column;gap:6px}}
+.leg{{display:flex;align-items:center;gap:9px;background:none;border:1px solid transparent;
+  color:var(--ink);font:inherit;font-size:13.5px;padding:3px 10px;border-radius:8px;cursor:pointer;
+  width:180px;text-align:left;transition:.15s}}
+.leg:hover{{background:var(--card)}}
+.leg.off{{opacity:.32}}
+.leg .dot{{width:11px;height:11px;border-radius:3px;flex:none}}
+.leg b{{margin-left:auto;font-variant-numeric:tabular-nums}}
+.tiles{{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;flex:1;min-width:280px}}
+.tile{{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}}
+.tile-n{{font:700 25px var(--mono)}}
+.tile-l{{color:var(--mut);font-size:12.5px;margin-top:2px}}
+.toolbar{{position:sticky;top:0;z-index:5;display:flex;gap:10px;flex-wrap:wrap;align-items:center;
+  background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin:22px 0 14px}}
+.search{{flex:1;min-width:200px;background:var(--bg);border:1px solid var(--line);color:var(--ink);
+  border-radius:8px;padding:8px 12px;font:inherit}}
+.search:focus{{outline:2px solid var(--accent);outline-offset:-1px}}
+.btn{{background:var(--card);border:1px solid var(--line);color:var(--ink);border-radius:8px;
+  padding:8px 12px;cursor:pointer;font:inherit;font-size:13px}}
+.btn:hover{{border-color:var(--accent)}}
+.count{{color:var(--mut);font-size:13px;margin-left:auto}}
+.card{{background:var(--card);border:1px solid var(--line);border-left:4px solid #888;
+  border-radius:10px;margin:10px 0;overflow:hidden}}
+.card[data-sev=Critical]{{border-left-color:{C['Critical']}}}
+.card[data-sev=High]{{border-left-color:{C['High']}}}
+.card[data-sev=Medium]{{border-left-color:{C['Medium']}}}
+.card[data-sev=Low]{{border-left-color:{C['Low']}}}
+.card[data-sev=Info]{{border-left-color:{C['Info']}}}
+.card.hide{{display:none}}
+summary{{list-style:none;cursor:pointer;display:flex;gap:10px;align-items:center;padding:13px 16px;
+  user-select:none}}
+summary::-webkit-details-marker{{display:none}}
+.pill{{color:#0b0e14;border-radius:5px;padding:2px 9px;font-size:11px;font-weight:800;flex:none;
+  text-transform:uppercase;letter-spacing:.04em}}
+.ctitle{{font-weight:600;font-size:15.5px}}
+.cat{{color:var(--mut);font-size:11.5px;border:1px solid var(--line);border-radius:20px;padding:1px 9px}}
+.idx{{margin-left:auto;color:var(--mut);font:12px var(--mono)}}
+.cbody{{padding:0 16px 16px;border-top:1px solid var(--line)}}
+.target{{color:var(--accent);font:13px var(--mono);word-break:break-all;margin:12px 0 4px;
+  display:flex;gap:8px;align-items:center}}
+pre{{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:11px 13px;
+  overflow:auto;font:12.5px var(--mono);white-space:pre-wrap;word-break:break-word;margin:8px 0}}
+.code{{position:relative}}.code pre{{color:#9ae6b4}}
+.copy{{background:var(--bg2);border:1px solid var(--line);color:var(--mut);border-radius:6px;
+  padding:2px 9px;font-size:11px;cursor:pointer;flex:none}}
+.code .copy{{position:absolute;top:14px;right:8px}}
+.copy:hover{{color:var(--ink);border-color:var(--accent)}}
+.exp{{margin:10px 0;padding:11px 13px;border-left:3px solid {C['Critical']};
+  background:rgba(255,77,109,.07);border-radius:8px;font-size:13.5px}}
+.verdict{{font-weight:700;color:{C['High']}}}
+.exp ol{{margin:7px 0 0;padding-left:20px}}.exp li{{margin:3px 0}}
+.kv{{margin:8px 0;font-size:13.5px;color:var(--ink)}}.kv b{{color:var(--mut);margin-right:6px}}
+.kv code,.kv ul{{font-size:12.5px}}
+.muted{{color:var(--mut);font-size:12.5px;margin-top:6px}}
+.empty{{text-align:center;color:var(--mut);padding:50px;background:var(--card);
+  border:1px solid var(--line);border-radius:12px}}
+h2{{font-size:15px;margin:30px 0 4px;color:var(--mut);letter-spacing:.06em;text-transform:uppercase}}
+.sec{{background:var(--card);border:1px solid var(--line);border-radius:10px;margin:10px 0}}
+.sec>summary{{font-weight:600}}
+.secbody{{padding:4px 16px 16px;border-top:1px solid var(--line)}}
+table{{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}}
+th,td{{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}}
+th{{color:var(--mut);font-weight:600;font-size:12px}}
+td code{{font-size:12px}}
+.tech,.sub{{display:inline-block;background:var(--bg);border:1px solid var(--line);border-radius:6px;
+  padding:2px 8px;margin:3px 4px 0 0;font:12px var(--mono)}}
+.sub{{color:var(--mut)}}.subwrap{{margin-top:10px;max-height:340px;overflow:auto}}
+.plan{{color:var(--ink);line-height:1.7}}
+footer{{color:var(--mut);font-size:12px;padding:30px 0;text-align:center}}
 </style></head><body>
-<header><div class="wrap"><h1>Bug Bounty Recon — {esc(result.target)}</h1>
-<div class="meta">Generated {esc(result.timestamp)} · bounty_recon.py v{VERSION} · {len(result.findings)} findings · {len(result.subdomains)} subdomains · {len(result.live_hosts)} live hosts</div></div></header>
-<div class="wrap"><div class="chips">{chips}</div>
-{''.join(rows) if rows else '<p>No findings.</p>'}
-</div><footer>Read-only unless run with an active profile — authorised targets only.</footer></body></html>"""
+<header><div class="wrap">
+  <div class="brand">Bug Bounty Recon</div>
+  <h1>{esc(result.target)}</h1>
+  <div class="meta">Generated {esc(result.timestamp)} · bounty_recon.py v{VERSION} ·
+    {total} findings · {len(result.subdomains)} subdomains · {len(result.live_hosts)} live hosts</div>
+  <div class="hero">
+    {donut}
+    <div class="legend">{legend}</div>
+    <div class="tiles">{tiles}</div>
+  </div>
+</div></header>
+<div class="wrap">
+  <div class="toolbar">
+    <input class="search" id="q" placeholder="🔍 Filter findings by text, host, category…" autocomplete="off">
+    <button class="btn" id="exp">Expand all</button>
+    <button class="btn" id="col">Collapse all</button>
+    <span class="count" id="cnt"></span>
+  </div>
+  <h2>Findings</h2>
+  <div id="findings">{findings_html}</div>
+  {f'<h2>Recon detail</h2>{sections_html}' if sections_html else ''}
+</div>
+<footer>Read-only unless run with an active profile · authorised targets only · bounty_recon.py v{VERSION}</footer>
+<script>
+const off=new Set(),q=document.getElementById('q'),cnt=document.getElementById('cnt');
+const cards=[...document.querySelectorAll('.card')];
+function apply(){{
+  const t=q.value.trim().toLowerCase();let n=0;
+  cards.forEach(c=>{{
+    const okS=!off.has(c.dataset.sev);
+    const okT=!t||(c.dataset.blob||'').includes(t);
+    const show=okS&&okT;c.classList.toggle('hide',!show);if(show)n++;
+  }});
+  cnt.textContent=n+' / '+cards.length+' shown';
+}}
+document.querySelectorAll('.leg').forEach(b=>b.addEventListener('click',()=>{{
+  const s=b.dataset.sev;off.has(s)?off.delete(s):off.add(s);b.classList.toggle('off');apply();
+}}));
+q.addEventListener('input',apply);
+document.getElementById('exp').onclick=()=>cards.forEach(c=>!c.classList.contains('hide')&&(c.open=true));
+document.getElementById('col').onclick=()=>cards.forEach(c=>c.open=false);
+document.addEventListener('click',e=>{{
+  const b=e.target.closest('.copy');if(!b)return;e.preventDefault();
+  navigator.clipboard.writeText(b.dataset.copy).then(()=>{{
+    const o=b.textContent;b.textContent='✓ copied';setTimeout(()=>b.textContent=o,1200);
+  }});
+}});
+apply();
+</script>
+</body></html>"""
     out_path.write_text(doc, encoding="utf-8")
 
 def print_finding(f: dict):
