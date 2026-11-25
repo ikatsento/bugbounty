@@ -42,6 +42,7 @@ and `artemis_triage.py` have been merged into it (`--ai-triage` / `--ai-plan`).
 ```
 bugbounty/
 ├── bounty_recon.py          ← the whole tool (recon + scan + AI triage + report)
+├── ARSENAL.md               ← payloads, oneliners, WAF bypass, submission rules
 ├── requirements.txt
 ├── Payloads/                ← payload library
 │   ├── xss.txt   ssti.txt   sqli.txt   ssrf.txt
