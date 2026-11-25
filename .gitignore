@@ -1,0 +1,27 @@
+# Scan output
+reports/
+*.md.bak
+*_report_*.md
+nuclei_output.jsonl
+*.json
+!report_templates/*.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+
+# Secrets / local config
+.env
+.env.*
+*.key
+*.pem
+secrets.*
+
+# OS
+.DS_Store
+Thumbs.db

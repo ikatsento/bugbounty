@@ -1,36 +1,39 @@
 # 🕵️ Bug Bounty Toolkit
 
-**Passive Recon · Active Testing · AI-Assisted Triage · Payload Library**
+**One script: Recon · Scanning · AI-Assisted Triage · Reporting — plus a payload/checklist library.**
 
-> ⚠️ Use only on targets you have explicit written permission to test.
+> ⚠️ Use only on targets you have explicit written permission to test. Active
+> modules send injection/probe traffic; keep them off (`--profile passive`)
+> unless the target is in scope.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Install dependencies
-pip install httpx dnspython rich anthropic playwright
-playwright install chromium
+# Install
+pip install -r requirements.txt
+# (optional) browser crawl:  playwright install chromium
 
-# Full passive recon
-python3 bounty_recon.py -t target.com --out-dir ./reports
+# Read-only recon (safe default)
+python3 bounty_recon.py -t target.com --profile passive --out-dir ./reports
 
-# Full scan (all modules)
-python3 bounty_recon.py -t target.com --full --out-dir ./reports
+# Safe non-destructive probes (headers, CORS, cache, open-redirect, nuclei)
+python3 bounty_recon.py -t target.com --profile safe --html --out-dir ./reports
 
-# Specific modules
-python3 bounty_recon.py -t target.com --js --graphql --waf --ssrf --cve
+# Everything, including active injection + OOB probes (authorised targets only)
+python3 bounty_recon.py -t target.com --profile aggressive \
+    --ssrf-callback https://your.interactsh.com --html --json
 
-# AI-assisted triage
-python3 agentic/claude_hunter.py -t target.com
+# Pick individual modules
+python3 bounty_recon.py -t target.com --js --graphql --waf --cache-poison --lib-versions
 
-# Analyze existing report with AI
-python3 agentic/claude_hunter.py -t target.com --findings-file reports/report.md
-
-# AI payload suggestion
-python3 agentic/claude_hunter.py -t target.com --tech "Next.js Auth.js" --vuln "SSTI"
+# AI triage + attack plan on the findings (auto-detects Ollama/Groq/Anthropic)
+python3 bounty_recon.py -t target.com --profile safe --ai-triage --ai-plan
 ```
+
+Everything is now **one file** — `bounty_recon.py`. The old `claude_hunter.py`
+and `artemis_triage.py` have been merged into it (`--ai-triage` / `--ai-plan`).
 
 ---
 
@@ -38,138 +41,98 @@ python3 agentic/claude_hunter.py -t target.com --tech "Next.js Auth.js" --vuln "
 
 ```
 bugbounty/
-├── bounty_recon.py          ← Main scanner (v3.0)
-├── agentic/
-│   └── claude_hunter.py     ← AI-assisted recon loop (Claude API)
-├── payloads/
-│   ├── xss.txt              ← XSS: basic, WAF bypass, ATO chain, blind
-│   ├── ssti.txt             ← SSTI: detection canaries + per-engine RCE
-│   ├── sqli.txt             ← SQLi: union, blind, NoSQL, header injection
-│   ├── ssrf.txt             ← SSRF: cloud metadata, protocol smuggling
-│   ├── lfi.txt              ← LFI: traversal, PHP wrappers, log poisoning
-│   ├── cmd_injection.txt    ← Cmd injection: space bypass, OOB, Windows
-│   ├── waf_bypass.txt       ← WAF bypass: Cloudflare, Akamai, Imperva
-│   └── xxe/
-│       ├── basic.xml        ← XXE: file read, OOB, SSRF, SOAP
-│       ├── svg_xxe.svg      ← SVG XXE for file upload endpoints
-│       └── docx_xxe.py      ← DOCX XXE injector script
-├── checklist/
-│   ├── 2026_methodology.md  ← Full bug bounty methodology (Phase 1–5)
-│   └── modern_surface.md    ← GraphQL, WebSocket, OAuth, Prototype Pollution, LLM
+├── bounty_recon.py          ← the whole tool (recon + scan + AI triage + report)
+├── requirements.txt
+├── Payloads/                ← payload library
+│   ├── xss.txt   ssti.txt   sqli.txt   ssrf.txt
+│   ├── lfi.txt   cmd_injection.txt      waf_bypass.txt
+├── xxe/
+│   ├── basic.xml  svg_xxe.svg  docx_xxe.py
+├── Checklist/
+│   ├── 2026_methodology.md  modern_surface.md
 ├── exploit_chains/
-│   ├── xss_to_ato.md        ← XSS → Account Takeover chains A/B/C/D
-│   └── ssrf_to_rce.md       ← SSRF → AWS Credentials → RCE
+│   ├── xss_to_ato.md  ssrf_to_rce.md
 └── report_templates/
-    └── report.md            ← HackerOne/Bugcrowd report template
+    └── report.md
 ```
 
 ---
 
-## bounty_recon.py v3.0 — Module Reference
+## Scan Profiles
 
-| Flag | Module | Description |
-|------|--------|-------------|
-| *(default)* | Subdomain enum | crt.sh + HackerTarget + AlienVault + Anubis + RapidDNS |
-| *(default)* | DNS + Takeover | A/CNAME/MX + SPF/DMARC/CAA + 23 service fingerprints |
-| *(default)* | Live hosts | HTTPS/HTTP reachability + tech fingerprinting |
-| *(default)* | Endpoint sweep | 80+ sensitive paths with Soft-404 filter |
-| *(default)* | Security headers | 9 required headers + CSP analysis |
-| *(default)* | TLS check | Cert expiry + TLS 1.0/1.1 + weak ciphers |
-| *(default)* | CORS | Reflected origin + Allow-Credentials |
-| *(default)* | Exposures | JWKS, source maps, .git |
-| `--graphql` | GraphQL | Introspection, batching, unauth ops |
-| `--waf` | WAF fingerprint | Vendor + bypass tips |
-| `--ssrf` | SSRF | Parameter name detection |
-| `--ssrf-callback URL` | SSRF active | OOB probe injection |
-| `--open-redirect` | Open redirect | 25 param names, reflected test |
-| `--ssti` | SSTI canary | {{7*7}} injection, per-engine |
-| `--proto-pollution` | Prototype pollution | __proto__ + constructor probe |
-| `--race` | Race conditions | Coupon/transfer endpoint hints |
-| `--idor` | IDOR | Numeric/UUID ID in API responses |
-| `--lfi-xxe` | LFI/XXE surface | Param names + upload forms |
-| `--js` | JS secrets | 22-pattern scan + endpoint extraction |
-| `--wayback` | Wayback | Historical parameterised URLs |
-| `--param-mine` | Param mining | Unique param name extraction |
-| `--idn` | IDN | Homoglyph domain registration check |
-| `--cve` | CVE fingerprints | 11 products (passive, no exploitation) |
-| `--s3` | Cloud storage | S3 + GCS bucket permutations |
-| `--nuclei` | nuclei | misconfig/exposure/headers/ssl templates |
-| `--playwright` | Browser crawl | Dynamic SPA + XHR capture |
-| `--import-dalfox FILE` | Import | Parse Dalfox XSS output |
-| `--import-nuclei FILE` | Import | Parse nuclei JSONL output |
-| `--full` | All modules | Enables every optional module |
-| `--json` | JSON output | Write structured JSON report |
+| Profile | What runs | Traffic |
+|---------|-----------|---------|
+| `passive` | subdomains, DNS, live hosts, tech, endpoint sweep, headers, TLS, CORS, exposures, JS secrets, wayback, params, CVE fingerprint, lib-versions | read-only |
+| `safe` | passive **+** open-redirect, IDOR, LFI/XXE surface, race hints, cache-poison, nuclei | non-destructive probes |
+| `aggressive` | **all** modules + SSTI/prototype-pollution injection + active SSRF OOB (implies `--active`) | intrusive |
+
+Individual `--<module>` flags still work and can be combined with any profile.
 
 ---
 
-## AI Modules (claude_hunter.py)
+## Key Flags
 
-| Mode | Command |
+| Flag | Purpose |
 |------|---------|
-| Full recon | `--target domain.com` |
-| Subdomain triage | reads from subfinder/amass |
-| Tech analysis | reads from httpx output |
-| Findings analysis | `--findings-file report.md` |
-| Payload suggestion | `--tech "Next.js" --vuln "SSRF"` |
-| Stdin subdomains | `cat subs.txt \| python3 claude_hunter.py -t domain --stdin` |
+| `--profile passive\|safe\|aggressive` | module bundle + safety posture |
+| `--active` | allow intrusive out-of-band probes |
+| `--threads N` / `--rate R` / `--retries N` / `--timeout S` | concurrency, global req/s cap, retry/backoff |
+| `--ssrf-callback URL` | OOB listener for active SSRF (needs `--active`) |
+| `--ai-triage` / `--ai-plan` | 3-phase AI triage / attack plan over findings |
+| `--ai-provider auto\|ollama\|groq\|anthropic` / `--ai-model` / `--ai-min-sev` | AI backend + scope |
+| `--html` / `--json` | extra report formats (Markdown always written) |
+| `--full` | enable every module (read-only + active) |
+
+Run `python3 bounty_recon.py --help` for the complete list.
 
 ---
 
-## Recommended Tool Stack
+## Module Reference (highlights)
+
+Subdomain enum (crt.sh/HackerTarget/AlienVault/Anubis/RapidDNS/SecurityTrails) ·
+DNS + dangling-CNAME takeover (22 services) · live-host + tech fingerprint ·
+80+ sensitive-path sweep with soft-404 filter · security headers + CSP analysis ·
+TLS (expiry, TLS 1.0/1.1, weak ciphers) · **CORS bypass matrix** · exposures
+(.git, source maps, JWKS) · GraphQL audit · WAF fingerprint · SSRF · open redirect ·
+SSTI · prototype pollution · race hints · IDOR · LFI/XXE surface · **cache poisoning** ·
+**outdated-JS-lib (retire.js-lite)** · entropy-gated JS secret scan · JWT audit ·
+Wayback + param mining · IDN homoglyph · CVE fingerprints · nuclei wrapper (OAST on) ·
+Dalfox/nuclei import · **AI 3-phase triage** · **AI attack plan**.
+
+---
+
+## AI Triage
+
+`--ai-triage` runs a 3-phase review (worth pursuing? → reproduce → CVSS severity &
+report) on each in-memory finding at or above `--ai-min-sev`, then writes the
+confirmed set into the Markdown/JSON/HTML report. Providers, in auto-detect order:
 
 ```bash
-# Recon
-subfinder  — subdomain enumeration
-amass      — additional passive DNS
-httpx      — live host + tech detection
-gau        — historical URLs from multiple sources
-waybackurls — Wayback Machine URL extraction
+# Local & free
+brew install ollama && ollama pull llama3.2 && ollama serve
+# Groq
+export GROQ_API_KEY=gsk_...
+# Anthropic (override model with ANTHROPIC_MODEL, default claude-sonnet-5-5)
+export ANTHROPIC_API_KEY=sk-ant-...
+```
 
-# Scanning
-nuclei     — vulnerability templates
-dalfox     — XSS scanning
-sqlmap     — SQL injection
-ffuf       — directory / parameter fuzzing
-param-miner (Burp) — hidden parameter discovery
+---
 
-# Manual
-Burp Suite Professional
-Caido (alternative to Burp)
-Postman / Insomnia (API testing)
+## Recommended External Tool Stack
 
-# OOB
-interactsh-client  — OOB callback listener
-Burp Collaborator  — OOB via Burp
-
-# Install all Go tools
+```bash
 go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
 go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
 go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest
 go install -v github.com/hahwul/dalfox/v2@latest
 go install -v github.com/lc/gau/v2/cmd/gau@latest
-go install -v github.com/tomnomnom/waybackurls@latest
-go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest
 go install -v github.com/ffuf/ffuf/v2@latest
 ```
 
----
-
-## Requirements
-
-```
-# Python
-pip install httpx dnspython rich anthropic playwright
-
-# Playwright browser
-playwright install chromium
-
-# Environment variables (optional)
-export GITHUB_TOKEN=ghp_...
-export SECURITYTRAILS_API_KEY=...
-export ANTHROPIC_API_KEY=sk-ant-...  # for claude_hunter.py
-```
+Pair with Burp Suite / Caido for manual testing and `interactsh-client` for OOB.
 
 ---
 
-*All tools and payloads are for authorized security testing only.*  
-*Unauthorized use against systems you don't own is illegal.*
+*All tools and payloads are for authorized security testing only.
+Unauthorized use against systems you don't own is illegal.*
