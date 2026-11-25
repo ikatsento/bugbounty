@@ -48,6 +48,12 @@ instead of a fixed `{{7*7}}`→`49`. And every actionable finding now prints its
 **copy-paste verification commands** (`↳ verify:` lines) right in the terminal —
 what to run and how, per class (SSRF, XSS, IDOR, SSTI, CORS, CSP, …).
 
+**v4.3 — framework mapping.** Every finding is now tagged to **MITRE ATT&CK**,
+**OWASP Top 10 (2021)** and **OWASP WSTG** (the `🗺` line in the terminal, chips in
+the HTML report, a `**Framework:**` line in Markdown) — reports that speak the
+language triagers trust. See [`METHODOLOGY.md`](./METHODOLOGY.md). *(Mapping inspired
+by [BitterSecurity/Decepticon](https://github.com/BitterSecurity/Decepticon), Apache-2.0.)*
+
 ---
 
 ## Repository Structure
@@ -57,6 +63,7 @@ bugbounty/
 ├── bounty_recon.py          ← the whole tool (recon + scan + AI triage + report)
 ├── ARSENAL.md               ← payloads, oneliners, WAF bypass, technique radar, submission rules
 ├── TOOLS.md                 ← ~400-tool catalog by phase + one-shot install
+├── METHODOLOGY.md           ← MITRE ATT&CK / OWASP Top-10 / WSTG framework mapping
 ├── requirements.txt
 ├── Payloads/                ← payload library
 │   ├── xss.txt   ssti.txt   sqli.txt   ssrf.txt

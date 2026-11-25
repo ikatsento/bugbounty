@@ -131,7 +131,7 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-VERSION  = "4.2.0"
+VERSION  = "4.3.0"
 TIMEOUT  = 12
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 BROWSER_HEADERS = {
@@ -2067,6 +2067,47 @@ def print_ascii_chart(findings: list):
 VERDICT_LABEL = {"yes":"✅ EXPLOITABLE", "manual":"🔶 NEEDS MANUAL PROOF",
                  "no":"⛔ NOT REPORTABLE ALONE"}
 
+# ── Framework mapping (inspired by BitterSecurity/Decepticon's recon-methodology,
+#    Apache-2.0; the referenced frameworks — MITRE ATT&CK, OWASP Top 10 / WSTG —
+#    are public standards). Tagging findings to recognised frameworks is what makes
+#    a report read as professional to a triager. ────────────────────────────────
+FRAMEWORK_MAP = {
+    "ssrf":                ("T1190 Exploit Public-Facing App", "A10:2021 SSRF",                    "WSTG-INPV-19"),
+    "idor":                ("T1190 Exploit Public-Facing App", "A01:2021 Broken Access Control",   "WSTG-ATHZ-04"),
+    "xss":                 ("T1059 Command & Scripting",        "A03:2021 Injection",               "WSTG-CLNT-01"),
+    "xss-dalfox":          ("T1059 Command & Scripting",        "A03:2021 Injection",               "WSTG-CLNT-01"),
+    "ssti":                ("T1190 Exploit Public-Facing App",  "A03:2021 Injection",               "WSTG-INPV-18"),
+    "sqli":                ("T1190 Exploit Public-Facing App",  "A03:2021 Injection",               "WSTG-INPV-05"),
+    "lfi":                 ("T1083 File & Directory Discovery", "A01:2021 Broken Access Control",   "WSTG-ATHZ-01"),
+    "xxe":                 ("T1190 Exploit Public-Facing App",  "A05:2021 Security Misconfig",      "WSTG-INPV-07"),
+    "open-redirect":       ("T1190 Exploit Public-Facing App",  "A01:2021 Broken Access Control",   "WSTG-CLNT-04"),
+    "cors":                ("T1190 Exploit Public-Facing App",  "A05:2021 Security Misconfig",      "WSTG-CLNT-07"),
+    "headers":             ("—",                                "A05:2021 Security Misconfig",      "WSTG-CONF-01"),
+    "cve-fingerprint":     ("T1595.002 Vulnerability Scanning", "A06:2021 Vulnerable Components",   "WSTG-INFO-09"),
+    "outdated-lib":        ("T1595.002 Vulnerability Scanning", "A06:2021 Vulnerable Components",   "WSTG-INFO-09"),
+    "cache-poison":        ("T1190 Exploit Public-Facing App",  "A05:2021 Security Misconfig",      "WSTG-INPV-19"),
+    "graphql":             ("T1190 Exploit Public-Facing App",  "API8:2023 Security Misconfig",     "WSTG-APIT-01"),
+    "jwt":                 ("T1550 Use Alternate Auth Material","A07:2021 Auth Failures",           "WSTG-SESS-01"),
+    "dns-takeover":        ("T1584.001 Compromise Domains",     "A05:2021 Security Misconfig",      "WSTG-CONF-10"),
+    "s3":                  ("T1530 Data from Cloud Storage",    "A05:2021 Security Misconfig",      "WSTG-CONF-11"),
+    "exposure":            ("T1592 Gather Victim Host Info",    "A05:2021 Security Misconfig",      "WSTG-CONF-04"),
+    "tls":                 ("—",                                "A02:2021 Cryptographic Failures",  "WSTG-CRYP-01"),
+    "dns-sec":             ("T1590 Gather Victim Network Info", "A05:2021 Security Misconfig",      "WSTG-INFO-02"),
+    "cookies":             ("T1539 Steal Web Session Cookie",   "A07:2021 Auth Failures",           "WSTG-SESS-02"),
+    "waf":                 ("T1590 Gather Victim Network Info", "—",                                "WSTG-INFO-10"),
+    "idn-homoglyph":       ("T1583.001 Acquire Domains",        "—",                                "WSTG-CLNT-04"),
+    "prototype-pollution": ("T1059 Command & Scripting",        "A03:2021 Injection",               "WSTG-INPV-11"),
+    "race-condition":      ("T1190 Exploit Public-Facing App",  "A04:2021 Insecure Design",         "WSTG-BUSL-13"),
+    "js-secrets":          ("T1552 Unsecured Credentials",      "A05:2021 Security Misconfig",      "WSTG-CONF-04"),
+    "github":              ("T1593.003 Search Open Websites",   "A05:2021 Security Misconfig",      "WSTG-INFO-05"),
+}
+
+def framework_for(category: str) -> dict:
+    """Map a finding category to MITRE ATT&CK / OWASP Top-10 / OWASP WSTG tags."""
+    mitre, owasp, wstg = FRAMEWORK_MAP.get((category or "").lower(),
+        ("T1595 Active Scanning", "—", "WSTG-INFO-01"))
+    return {"mitre": mitre, "owasp": owasp, "wstg": wstg}
+
 def _exp(verdict, impact, steps, poc=None):
     return {"verdict": verdict, "impact": impact, "steps": steps, "poc": poc}
 
@@ -2265,6 +2306,7 @@ fetch("{url}", {{credentials:"include"}})
 def attach_exploitation(result: ScanResult, domain: str, out_dir: Path):
     for f in result.findings:
         f["exploit"] = exploitation_for(f, domain)
+        f["framework"] = framework_for(f.get("category") or f.get("type") or "")
     generate_poc_files(result.findings, domain, out_dir)
 
 def generate_markdown(result: ScanResult, out_path: Path):
@@ -2400,6 +2442,9 @@ def generate_markdown(result: ScanResult, out_path: Path):
             if f.get("poc_file"):
                 lines.append(f"\n> 📎 PoC file generated: `{f['poc_file']}`")
         if f.get("remediation"): lines.append(f"**Remediation:** {f['remediation']}")
+        fw = f.get("framework") or {}
+        fwp = [v for v in [fw.get("mitre"), fw.get("owasp"), fw.get("wstg")] if v and v != "—"]
+        if fwp: lines.append(f"**Framework:** {' · '.join(fwp)}")
         lines += [""]
 
     lines += ["## Passed Checks","","```"] + result.passed[:80] + ["```","",
@@ -2511,6 +2556,10 @@ def generate_html(result: ScanResult, out_path: Path):
                 f'{esc(exp.get("impact",""))}'
                 f'{f"<ol>{steps}</ol>" if steps else ""}{pocf}</div>')
 
+        fw = f.get("framework") or {}
+        fw_tags = "".join(f'<span class="fw">{esc(v)}</span>'
+                          for v in [fw.get("mitre"), fw.get("owasp"), fw.get("wstg")]
+                          if v and v != "—")
         body = "".join([
             f'<div class="target">{esc(url)}'
             f'<button class="copy" data-copy="{esc(url)}">copy</button></div>' if url else "",
@@ -2519,6 +2568,7 @@ def generate_html(result: ScanResult, out_path: Path):
              f'<button class="copy" data-copy="{esc(cmd)}">copy</button></div>') if cmd else "",
             exp_html,
             f'<div class="kv"><b>Fix</b> {esc(rem)}</div>' if rem else "",
+            f'<div class="fwrow">{fw_tags}</div>' if fw_tags else "",
         ])
 
         cards.append(
@@ -2664,6 +2714,9 @@ pre{{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding
 .verdict{{font-weight:700;color:{C['High']}}}
 .exp ol{{margin:7px 0 0;padding-left:20px}}.exp li{{margin:3px 0}}
 .kv{{margin:8px 0;font-size:13.5px;color:var(--ink)}}.kv b{{color:var(--mut);margin-right:6px}}
+.fwrow{{margin-top:10px;display:flex;gap:6px;flex-wrap:wrap}}
+.fw{{font:11px var(--mono);color:var(--mut);background:var(--bg);border:1px solid var(--line);
+  border-radius:6px;padding:2px 8px}}
 .kv code,.kv ul{{font-size:12.5px}}
 .muted{{color:var(--mut);font-size:12.5px;margin-top:6px}}
 .empty{{text-align:center;color:var(--mut);padding:50px;background:var(--card);
@@ -2744,11 +2797,17 @@ def print_finding(f: dict):
     # Show the "how to verify / exploit" steps in the terminal for anything worth
     # chasing (confirmed or needs-manual-proof). Skip the rejected 'no' verdicts.
     steps = exp.get("steps", []) if exp.get("verdict") in ("yes", "manual") else []
+    fw = f.get("framework") or {}
+    fw_line = ""
+    if fw and (fw.get("mitre","—") != "—" or fw.get("owasp","—") != "—"):
+        parts = [p for p in [fw.get("mitre"), fw.get("owasp"), fw.get("wstg")] if p and p != "—"]
+        fw_line = " · ".join(parts)
     if HAS_RICH:
         console.print(f"  {em} [bold]{sev}[/bold] {t}")
         if url: console.print(f"     [cyan]{url}[/cyan]")
         if ev:  console.print(f"     [green]{ev}[/green]")
         if vlabel: console.print(f"     [magenta]{vlabel}[/magenta] — {exp.get('impact','')}")
+        if fw_line: console.print(f"     [dim]🗺  {fw_line}[/dim]")
         for s in steps[:4]:
             console.print(f"     [yellow]↳[/yellow] {s}")
     else:
@@ -2756,6 +2815,7 @@ def print_finding(f: dict):
         if url: print(f"     {url}")
         if ev:  print(f"     {ev}")
         if vlabel: print(f"     {vlabel} — {exp.get('impact','')}")
+        if fw_line: print(f"     🗺  {fw_line}")
         for s in steps[:4]:
             print(f"     ↳ {s}")
 
