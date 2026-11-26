@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.9.0 — AI deep-analysis / gap review (2026)
+
+Inspired (concept only — no AGPL code) by autonomous-pentest frameworks: let the
+AI review the scanner's whole output and reason about what the deterministic
+modules missed, then write a final analyst report.
+
+Added
+- `--ai-analyze`: feeds the full scan context (hosts, tech, endpoints, mined
+  params, findings, counts) to the AI and asks for (1) coverage gaps, (2) deeper
+  manual leads per surface, (3) plausible chains, (4) prioritised next actions,
+  (5) analyst verdict. Distinct from `--ai-triage` (which only judges existing
+  findings). Reuses the Ollama/Groq/Anthropic provider layer; renders into the
+  Markdown + HTML reports. Leads are unproven — verify before reporting.
+- `build_ai_analysis_context()` (pure, size-capped, JSON-serialisable) +
+  `ai_deep_analysis()`; `ai_ask()` gained a `max_tokens` knob (3000 for analysis).
+- Tests for the context builder (caps, flattening, empty result, serialisable).
+  Suite: 37 tests, green. Graceful no-provider handling.
+
 ## 4.8.0 — access-bypass false-positive hardening (2026)
 
 Found while running v4.7 against a live Cloudflare+F5 target: `--access-bypass`

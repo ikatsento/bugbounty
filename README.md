@@ -140,6 +140,7 @@ Individual `--<module>` flags still work and can be combined with any profile.
 | `--threads N` / `--rate R` / `--retries N` / `--timeout S` | concurrency, global req/s cap, retry/backoff |
 | `--ssrf-callback URL` | OOB listener for active SSRF (needs `--active`) |
 | `--ai-triage` / `--ai-plan` | 3-phase AI triage / attack plan over findings |
+| `--ai-analyze` | AI deep-analysis of the WHOLE scan: coverage gaps the scanner missed, deeper manual leads, chains, final analyst report |
 | `--ai-provider auto\|ollama\|groq\|anthropic` / `--ai-model` / `--ai-min-sev` | AI backend + scope |
 | `--html` / `--json` / `--sarif` | extra report formats (Markdown always written; SARIF 2.1.0 for CI) |
 | `--access-bypass` / `--tls-downgrade` | unauthenticated: 401/403 path-norm + header-spoof bypass; https→http downgrade detection |
@@ -164,11 +165,25 @@ Dalfox/nuclei import · **AI 3-phase triage** · **AI attack plan**.
 
 ---
 
-## AI Triage
+## AI Triage & deep analysis
 
 `--ai-triage` runs a 3-phase review (worth pursuing? → reproduce → CVSS severity &
 report) on each in-memory finding at or above `--ai-min-sev`, then writes the
-confirmed set into the Markdown/JSON/HTML report. Providers, in auto-detect order:
+confirmed set into the Markdown/JSON/HTML report.
+
+`--ai-analyze` (v4.9) is different: it feeds the AI the **whole scan** — hosts,
+tech, endpoints, mined params and findings — and asks it to reason about what the
+deterministic modules **missed**: coverage gaps, concrete deeper manual leads per
+surface, plausible chains, and a final analyst verdict. It's the "the scanner is
+dumb, have a senior tester read everything and tell me what to check next" pass.
+Leads are unproven — verify before reporting. Example:
+
+```bash
+./.venv/bin/python bounty_recon.py -t target.com --profile safe --xss \
+    --access-bypass --tls-downgrade --ai-analyze --ai-triage --json --out-dir ./reports
+```
+
+Providers, in auto-detect order:
 
 ```bash
 # Local & free
