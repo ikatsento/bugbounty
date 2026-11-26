@@ -5,6 +5,15 @@ bounty_recon.py — All-in-one Bug Bounty Recon, Scanner & AI Triage
 Version : see VERSION constant below (single source of truth)
 License : MIT
 
+New in v4.9 (AI deep-analysis / gap review, 2026):
+  ✦ --ai-analyze            — feeds the WHOLE scan (hosts, tech, endpoints, params,
+                              findings) to the AI, which reasons about what the
+                              deterministic modules MISSED: coverage gaps, deeper
+                              manual leads, plausible chains, a final analyst report
+  ✦ Reuses the existing provider layer (Ollama local / Groq / Anthropic); renders
+    into the Markdown + HTML reports. Leads are unproven — verify before reporting.
+  (Distinct from --ai-triage, which only judges findings you already have.)
+
 New in v4.8 (access-bypass false-positive hardening, 2026):
   ✦ --access-bypass re-confirms — a candidate 200 must reproduce on a second
     request (baseline still denies, variant still grants) before it is reported
@@ -172,7 +181,7 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-VERSION  = "4.8.0"
+VERSION  = "4.9.0"
 TIMEOUT  = 12
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 BROWSER_HEADERS = {
@@ -582,6 +591,7 @@ class ScanResult:
     waf_detected:  dict = field(default_factory=dict)
     ai_triage:     list = field(default_factory=list)
     ai_plan:       str  = ""
+    ai_analysis:   str  = ""
     summary:       dict = field(default_factory=dict)
 
 # ── HTTP infrastructure: shared client, rate limiter, retry, concurrency ───────
@@ -2803,6 +2813,12 @@ def generate_markdown(result: ScanResult, out_path: Path):
     if result.ai_plan:
         lines += ["## 🤖 AI Attack Plan", "", result.ai_plan, ""]
 
+    if result.ai_analysis:
+        lines += ["## 🧠 AI Deep Analysis — gaps & final review", "",
+                  "_The AI reviewed the whole scan for what the deterministic modules "
+                  "may have missed. Leads are unproven — verify before reporting._", "",
+                  result.ai_analysis, ""]
+
     # Report-worthiness triage: what actually has an exploit path vs. pure noise
     if any(f.get("exploit") for f in result.findings):
         worthy = [f for f in result.findings if (f.get("exploit") or {}).get("verdict") in ("yes","manual")]
@@ -3081,6 +3097,10 @@ def generate_html(result: ScanResult, out_path: Path):
         sections.append(("🤖 AI attack plan",
                          f'<pre class="plan">{esc(result.ai_plan)}</pre>'))
 
+    if result.ai_analysis:
+        sections.append(("🧠 AI deep analysis — gaps & final review",
+                         f'<pre class="plan">{esc(result.ai_analysis)}</pre>'))
+
     sections_html = "".join(
         f'<details class="sec"><summary>{t}</summary><div class="secbody">{h}</div></details>'
         for t, h in sections)
@@ -3288,24 +3308,24 @@ def _ai_http_json(url: str, payload: dict, headers: dict, timeout: int = 60):
     with ur.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
 
-def ai_ask(prompt: str, provider: str, model: str, system: str = "") -> str:
+def ai_ask(prompt: str, provider: str, model: str, system: str = "", max_tokens: int = 2000) -> str:
     try:
         if provider == "ollama":
             msgs = ([{"role":"system","content":system}] if system else []) + [{"role":"user","content":prompt}]
             data = _ai_http_json("http://localhost:11434/api/chat",
                                  {"model":model,"messages":msgs,"stream":False,
-                                  "options":{"temperature":0.2,"num_predict":2000}}, {}, 120)
+                                  "options":{"temperature":0.2,"num_predict":max_tokens}}, {}, 180)
             return data.get("message",{}).get("content","")
         if provider == "groq":
             msgs = ([{"role":"system","content":system}] if system else []) + [{"role":"user","content":prompt}]
             data = _ai_http_json("https://api.groq.com/openai/v1/chat/completions",
-                                 {"model":model,"messages":msgs,"max_tokens":2000,"temperature":0.2},
-                                 {"Authorization": f"Bearer {os.environ.get('GROQ_API_KEY','')}"}, 60)
+                                 {"model":model,"messages":msgs,"max_tokens":max_tokens,"temperature":0.2},
+                                 {"Authorization": f"Bearer {os.environ.get('GROQ_API_KEY','')}"}, 90)
             return data["choices"][0]["message"]["content"]
         if provider == "anthropic":
             import anthropic
             client = anthropic.Anthropic()
-            msg = client.messages.create(model=model, max_tokens=2000, system=system,
+            msg = client.messages.create(model=model, max_tokens=max_tokens, system=system,
                                          messages=[{"role":"user","content":prompt}])
             return msg.content[0].text
     except Exception as e:
@@ -3410,6 +3430,64 @@ Produce a prioritised attack plan: top 3 chains to pursue first (with concrete s
 what to look for in responses, and low/medium/high effort per chain. Under 450 words.""",
         provider, model, "You are a senior penetration tester. Be practical and specific.")
 
+
+def build_ai_analysis_context(result: "ScanResult", max_endpoints: int = 60,
+                              max_params: int = 60, max_findings: int = 40) -> dict:
+    """Compact, serialisable snapshot of the WHOLE scan for the deep-analysis AI.
+
+    Pure (no I/O) so it can be unit-tested. Caps list sizes to keep the prompt
+    within token budgets.
+    """
+    tech = {}
+    for host, items in (result.technologies or {}).items():
+        tech[host] = items[:8] if isinstance(items, list) else items
+    findings = [{"severity": f.get("severity"),
+                 "title": f.get("title") or f.get("detail") or f.get("header"),
+                 "url": f.get("url") or f.get("host")}
+                for f in (result.findings or [])][:max_findings]
+    return {
+        "target": result.target,
+        "subdomains": (result.subdomains or [])[:40],
+        "live_hosts": [h.get("url") if isinstance(h, dict) else h
+                       for h in (result.live_hosts or [])][:40],
+        "technologies": tech,
+        "waf": result.waf_detected or {},
+        "endpoints": (result.endpoints or [])[:max_endpoints],
+        "parameters": (result.parameters or [])[:max_params],
+        "findings": findings,
+        "finding_counts": result.summary or {},
+    }
+
+
+AI_ANALYSIS_SYSTEM = (
+    "You are a senior web application penetration tester reviewing the output of an "
+    "AUTOMATED, deterministic recon scanner. The scanner only runs fixed checks and "
+    "WILL have missed things. Your job is to reason about what a human should look at "
+    "next — gaps, untested surfaces and plausible chains — WITHOUT inventing findings. "
+    "This is an UNAUTHENTICATED black-box scan. Be concrete and tie every point to the "
+    "actual hosts/tech/endpoints shown. Mark anything unproven as 'needs manual check'."
+)
+
+
+def ai_deep_analysis(result: "ScanResult", provider: str, model: str) -> str:
+    """Feed the AI the full scan context; get a gap-analysis + final report (markdown)."""
+    ctx = build_ai_analysis_context(result)
+    prompt = (
+        "Here is the full scan context as JSON:\n\n```json\n"
+        + json.dumps(ctx, indent=2, ensure_ascii=False)
+        + "\n```\n\nWrite a markdown analyst report with these sections:\n"
+        "1. **Coverage gaps** — vuln classes / surfaces the automated scan did NOT test "
+        "or that need manual review, specific to the tech and endpoints above.\n"
+        "2. **Deeper leads** — for each interesting host/endpoint, the concrete manual "
+        "tests to run next (name the tool/command).\n"
+        "3. **Plausible chains** — how the observed items might combine.\n"
+        "4. **Prioritised next actions** — an ordered checklist (most promising first).\n"
+        "5. **Analyst verdict** — one short paragraph: what is worth time vs. a dead end.\n"
+        "Do not claim vulnerabilities that aren't evidenced. Under 700 words."
+    )
+    return ai_ask(prompt, provider, model, AI_ANALYSIS_SYSTEM, max_tokens=3000)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(
@@ -3464,6 +3542,9 @@ def main():
                     help="Run 3-phase AI triage on findings (auto-detects Ollama/Groq/Anthropic)")
     ap.add_argument("--ai-plan",              action="store_true", dest="ai_plan",
                     help="Generate an AI prioritised attack plan from the findings")
+    ap.add_argument("--ai-analyze",           action="store_true", dest="ai_analyze",
+                    help="AI deep-analysis of the WHOLE scan: what the scanner missed, "
+                         "deeper manual leads, plausible chains, final analyst report")
     ap.add_argument("--ai-provider",          default="auto", choices=["auto","ollama","groq","anthropic"],
                     help="AI provider for triage/plan (default auto)")
     ap.add_argument("--ai-model",             default="", help="Override AI model name")
@@ -3866,7 +3947,7 @@ def main():
     print_ascii_chart(all_findings)
 
     # ── AI triage / attack plan (optional) ───────────────────────────────────
-    if args.ai_triage or args.ai_plan:
+    if args.ai_triage or args.ai_plan or args.ai_analyze:
         if args.ai_provider == "auto":
             provider, model = ai_detect_provider()
         else:
@@ -3895,6 +3976,11 @@ def main():
                 console.rule("[bold magenta]AI ATTACK PLAN") if HAS_RICH else print("\n=== AI ATTACK PLAN")
                 result.ai_plan = ai_attack_plan(domain, all_findings, provider, model)
                 console.print(result.ai_plan[:600])
+            if args.ai_analyze:
+                console.rule(f"[bold magenta]AI DEEP ANALYSIS ({provider}/{model})") if HAS_RICH else print(f"\n=== AI DEEP ANALYSIS ({provider}/{model})")
+                console.print("  (reviewing the whole scan for gaps the scanner missed…)")
+                result.ai_analysis = ai_deep_analysis(result, provider, model)
+                console.print(result.ai_analysis[:900])
 
     s = result.summary
     if HAS_RICH:
