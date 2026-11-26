@@ -66,17 +66,18 @@ technique recipes (request smuggling/H2 desync, web cache deception, OAuth/SAML,
 client-side gadgets) were added to [`ARSENAL.md`](./ARSENAL.md) as verified
 recipes — deliberately **not** FP-prone auto-probes.
 
-**v4.5 — authenticated scanning + access-control bypass.** Generalised from an
-authorised n8n/Next.js engagement:
-- **Authenticated scans** — `--cookie`, `--auth-state <playwright-storageState.json>`
-  and repeatable `--header` are now replayed on **every** request, so modules run
-  behind a login (cookie or token auth).
-- **`--access-bypass`** — on endpoints that answer 401/403, it retries with
+**v4.6 — unauthenticated-only (login replay removed).** This tool is
+**no-login by design**: it never sends a cookie, session or auth header — every
+module is pure unauthenticated black-box discovery. (The `--cookie` /
+`--auth-state` / `--header` login flags briefly added in v4.5 were removed.)
+Two unauthenticated checks, generalised from an authorised engagement, remain:
+- **`--access-bypass`** — on endpoints that answer 401/403, retry with
   path-normalisation (`/%2e/`, `..;/`, `//`) **and** trusted-proxy header spoofs
-  (`X-Forwarded-For`, `X-Original-URL`, …) and reports a High if a variant returns
-  200 (confirm by hand).
+  (`X-Forwarded-For`, `X-Original-URL`, …); report a High if a variant returns
+  200 (confirm by hand). No credentials needed — it tests whether the edge/origin
+  ACL can be tricked.
 - **`--tls-downgrade`** — flags https endpoints that 3xx-redirect to cleartext
-  `http://`. Both are in the `safe`/`full` profiles. 25 tests, green.
+  `http://`. Both are in the `safe`/`full` profiles. 24 tests, green.
 
 ---
 
@@ -127,8 +128,7 @@ Individual `--<module>` flags still work and can be combined with any profile.
 | `--ai-triage` / `--ai-plan` | 3-phase AI triage / attack plan over findings |
 | `--ai-provider auto\|ollama\|groq\|anthropic` / `--ai-model` / `--ai-min-sev` | AI backend + scope |
 | `--html` / `--json` / `--sarif` | extra report formats (Markdown always written; SARIF 2.1.0 for CI) |
-| `--cookie` / `--auth-state <file>` / `--header 'N: V'` | authenticated scanning: cookie string, Playwright storageState JSON, or extra headers on every request |
-| `--access-bypass` / `--tls-downgrade` | 401/403 path-norm + header-spoof bypass; https→http downgrade detection |
+| `--access-bypass` / `--tls-downgrade` | unauthenticated: 401/403 path-norm + header-spoof bypass; https→http downgrade detection |
 | `--full` | enable every module (read-only + active) |
 
 Run `python3 bounty_recon.py --help` for the complete list.

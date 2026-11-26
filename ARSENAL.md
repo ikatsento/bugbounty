@@ -375,18 +375,10 @@ Use only where you are authorized.*
 
 ---
 
-## Authenticated hunting & n8n/low-code recipes (2020–2026) — v4.5
+## Unauthenticated deep-discovery & n8n/low-code recipes (2020–2026) — v4.6
 
-> Generalised from an authorised n8n/Next.js engagement. The scanner now carries
-> your session (`--cookie` / `--auth-state` / `--header`); these are the manual
-> follow-ups that turned recon into findings.
-
-### Replay a browser session
-```bash
-# capture once with Playwright, then feed storageState to the scanner:
-node -e "const{chromium}=require('playwright');(async()=>{const b=await chromium.launch({headless:false});const c=await b.newContext();const p=await c.newPage();await p.goto('https://target/login');console.log('log in, then press enter');process.stdin.once('data',async()=>{await c.storageState({path:'auth.json'});await b.close()})})()"
-python3 bounty_recon.py -t target.com --profile safe --auth-state auth.json
-```
+> Generalised from an authorised engagement. All **unauthenticated** — no login,
+> cookie or session. These are the manual follow-ups that turn recon into findings.
 
 ### Access-control bypass (what `--access-bypass` automates — verify by hand)
 ```bash
