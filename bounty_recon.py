@@ -5,6 +5,14 @@ bounty_recon.py — All-in-one Bug Bounty Recon, Scanner & AI Triage
 Version : see VERSION constant below (single source of truth)
 License : MIT
 
+New in v4.8 (access-bypass false-positive hardening, 2026):
+  ✦ --access-bypass re-confirms — a candidate 200 must reproduce on a second
+    request (baseline still denies, variant still grants) before it is reported
+  ✦ Block-page aware           — a 200 whose body is a WAF/F5 "Request Rejected" /
+    403 / login / challenge page is no longer treated as a bypass
+  (Caught on a live Cloudflare+F5 target where /%2e/ returned a 200 WAF block
+   page; the check now suppresses that class of edge/WAF false positive.)
+
 New in v4.7 (reflected-XSS surface + richer SSRF, 2026):
   ✦ Reflected-XSS surface    — --xss: canary + special-char reflection matrix
                                (<>"'`(){};=/), context-classified (html/attribute/
@@ -164,7 +172,7 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-VERSION  = "4.7.0"
+VERSION  = "4.8.0"
 TIMEOUT  = 12
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 BROWSER_HEADERS = {
@@ -2214,11 +2222,45 @@ def is_cleartext_downgrade(target_url: str, location: str) -> bool:
     return loc.startswith("http://")
 
 
+# Body markers that mean the "200" is really still an access-denied/error page
+# (CDNs and origins often serve a 200 "Forbidden"/challenge page).
+ACCESS_DENIED_MARKERS = (
+    "403 forbidden", "401 unauthorized", "access denied", "not authorized",
+    "forbidden", "attention required", "you have been blocked", "request blocked",
+    "error 403", "error 401", "permission denied", "sign in", "log in to continue",
+    # WAF / block pages that return HTTP 200 with a rejection body
+    "request rejected", "requested url was rejected", "consult with your administrator",
+    "support id", "web application firewall", "incident id", "your request has been blocked",
+    "blocked by", "unauthorized access", "not acceptable",
+)
+
+
+def looks_like_access_denied(body_text: str) -> bool:
+    """True if a body (even a 200) is really a forbidden/login/challenge page."""
+    t = (body_text or "")[:2000].lower()
+    return any(m in t for m in ACCESS_DENIED_MARKERS)
+
+
+def _candidate_bypass(status: int, body: bytes, base_body: bytes) -> bool:
+    """A 200 only counts as a possible bypass if it is real, distinct content."""
+    if status not in (200, 201):
+        return False
+    if not body or len(body) <= 150:          # tiny stub / empty = not real access
+        return False
+    if base_body is not None and body == base_body:  # identical to the denied page
+        return False
+    if looks_like_access_denied(body.decode("utf-8", "replace")):
+        return False
+    return True
+
+
 def detect_access_control_bypass(url: str) -> list:
     """If `url` is 401/403, try path-normalisation + header spoofs for a 200.
 
-    Only fires on a genuine access-control boundary (baseline 401/403). A
-    variant that flips it to 200 is reported High and must be confirmed by hand.
+    Fires only when the bypass REPRODUCES on a second request (baseline still
+    denies AND the variant still grants distinct, non-error content) — this
+    suppresses transient CDN/edge 200s, identical 403 pages and 200 error pages.
+    Still 'needs manual proof', but no longer flags edge noise.
     """
     findings = []
     try:
@@ -2227,42 +2269,59 @@ def detect_access_control_bypass(url: str) -> list:
         return findings
     if base_status not in (401, 403):
         return findings
-    base_len = len(base_body or b"")
 
-    from urllib.parse import urlsplit, urlunsplit
+    from urllib.parse import urlsplit
     parts = urlsplit(url)
     origin = f"{parts.scheme}://{parts.netloc}"
     path = parts.path or "/"
 
+    def _confirmed(variant_url: str, headers=None) -> tuple:
+        """Request once; if it looks like a bypass, re-request to confirm it is
+        stable (baseline still denies, variant still grants). Returns (ok, body)."""
+        try:
+            st, _, body = http_get(variant_url, headers=headers, follow=False)
+        except Exception:
+            return (False, b"")
+        if not _candidate_bypass(st, body, base_body):
+            return (False, b"")
+        # Re-confirm: transient edge 200s and unstable boundaries drop out here.
+        try:
+            b2, _, _ = http_get(url, follow=False)
+            v2s, _, v2b = http_get(variant_url, headers=headers, follow=False)
+        except Exception:
+            return (False, b"")
+        if b2 not in (401, 403):
+            return (False, b"")                       # boundary not stable
+        if not _candidate_bypass(v2s, v2b, base_body):
+            return (False, b"")                       # not reproducible
+        return (True, v2b)
+
     # 1) path-normalisation variants
     for variant_path in path_bypass_variants(path):
-        try:
-            st, _, body = http_get(origin + variant_path, follow=False)
-        except Exception:
-            continue
-        if st in (200, 201) and len(body or b"") > 0 and len(body or b"") != base_len:
+        ok, body = _confirmed(origin + variant_path)
+        if ok:
             findings.append({"severity": "High", "category": "access-bypass",
                 "title": "Access-control bypass via path normalisation",
                 "url": origin + variant_path,
-                "detail": f"Baseline {url} = HTTP {base_status}; variant = HTTP {st} "
-                          f"({len(body)} bytes). Edge/WAF path ACL bypassed.",
+                "detail": f"Baseline {url} = HTTP {base_status}; variant = HTTP 200 "
+                          f"({len(body)} bytes of distinct content, confirmed twice). "
+                          "Edge/WAF path ACL bypassed.",
                 "command": f'curl -sk -o /dev/null -w "%{{http_code}}" "{origin + variant_path}"',
                 "remediation": "Normalise the path BEFORE the ACL check; match edge and origin parsers."})
             break
     # 2) header spoof variants
     for hdrs in HEADER_BYPASS_SETS:
-        try:
-            st, _, body = http_get(url, headers=hdrs, follow=False)
-        except Exception:
-            continue
-        if st in (200, 201) and len(body or b"") > 0 and len(body or b"") != base_len:
+        ok, body = _confirmed(url, headers=hdrs)
+        if ok:
             findings.append({"severity": "High", "category": "access-bypass",
                 "title": "Access-control bypass via trusted-proxy header spoof",
                 "url": url,
-                "detail": f"Baseline HTTP {base_status}; with {hdrs} = HTTP {st} "
-                          f"({len(body)} bytes). Origin trusts a client-supplied proxy header.",
+                "detail": f"Baseline HTTP {base_status}; with {hdrs} = HTTP 200 "
+                          f"({len(body)} bytes of distinct content, confirmed twice). "
+                          "Origin trusts a client-supplied proxy header.",
                 "command": f'curl -sk -H "{list(hdrs)[0]}: {list(hdrs.values())[0]}" "{url}"',
                 "remediation": "Never trust X-Forwarded-*/X-Original-URL from clients; strip them at the edge."})
+            break
             break
     return findings
 
