@@ -323,3 +323,52 @@ mixed content · weak TLS ciphers · missing HttpOnly/Secure alone · autocomple
 *Attribution: techniques here are public community knowledge (PortSwigger, PayloadsAllTheThings,
 HackTricks, tomnomnom, ProjectDiscovery, OWASP, and disclosed HackerOne/Bugcrowd reports).
 Use only where you are authorized.*
+
+---
+
+## Modern technique recipes (2020–2026) — added in v4.4
+
+> Added as **verified recipes, not auto-probes.** These classes are high-value
+> but high-false-positive when automated blindly, so they live here as
+> copy-paste commands you run and confirm manually (keeping the scanner's
+> signal high). Authorised targets only.
+
+### HTTP Request Smuggling / H2 desync (CL.TE, TE.CL, H2.CL, H2.TE)
+- **Primary tool:** Burp **HTTP Request Smuggler** extension (Albinowax) →
+  "Smuggle probe" + "HTTP Request Smuggler → Launch all scans".
+- **CLI:** [`smuggler.py`](https://github.com/defparam/smuggler) —
+  `python3 smuggler.py -u https://target/` (tests CL.TE/TE.CL timing).
+- **h2 downgrade desync (2021+, Kettle):** test HTTP/2 → HTTP/1.1 downgrade with
+  a crafted `Content-Length`/`Transfer-Encoding` in the h2 body; `h2cSmuggler`
+  for `h2c` upgrade smuggling: `python3 h2csmuggler.py -x https://target/ http://internal/`.
+- **Confirm:** a timed delay (TE.CL ~ `timeout`) or a poisoned response landing
+  on a *second* request. Never report on timing alone — land a controlled prefix.
+
+### Web Cache Deception (distinct from cache poisoning)
+- 2022 Omer Gil / 2024 Kettle path-normalisation variants.
+- **Recipe:** request an authenticated page with an appended static-looking path
+  or delimiter, then re-fetch unauthenticated:
+  ```bash
+  # does /account/profile get cached when suffixed like a static asset?
+  curl -s "https://target/account/profile/nonexistent.css" -H "Cookie: $SESSION" -o a.html
+  curl -s "https://target/account/profile/nonexistent.css" -o b.html   # no cookie
+  diff a.html b.html && echo "CACHED PRIVATE PAGE — WCD"
+  ```
+- Delimiter variants to try: `.css` `.js` `%2f..%2f` `;.css` `%00.css` `/%2e%2e/`.
+
+### OAuth / OIDC + SAML
+- **OAuth:** redirect_uri validation bypass (`//evil`, `/\evil`, path append,
+  `?`/`#` tricks), `state` absent/reused (CSRF), `code` leak via Referer, PKCE
+  downgrade, implicit-flow token in URL fragment, `prompt=none` session fixation.
+- **SAML:** XML Signature Wrapping (XSW1-8) with **SAML Raider** (Burp); comment
+  injection in `NameID`; unsigned-assertion acceptance; `samlify`/xmldom parser
+  differentials (CVE-2025-47949 class). Decode with `base64 -d | xmllint --format -`.
+
+### Client-side gadgets
+- **postMessage:** grep JS for `addEventListener("message"` with no `origin`
+  check → inject via a controlled iframe.
+- **DOM clobbering:** `<a id=x>` / `<form name=x>` to overwrite globals the app
+  reads (`window.config`, `document.x`); pairs with sanitiser bypass.
+- **Prototype pollution → XSS gadget:** pollute `__proto__.<sink>` then trigger a
+  library gadget (jQuery `$.extend`, Lodash `_.merge`, `Object.assign` on
+  attacker JSON). Confirm with `Object.prototype.polluted` in console.
