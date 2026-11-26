@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.7.0 — reflected-XSS surface + richer SSRF (2026)
+
+Attack-surface techniques from XSSRush (N45HT) and SSRFmap (swisskyrepo),
+re-implemented for the unauthenticated / no-browser design. Exploitation stays
+manual; detections are FP-honest leads.
+
+Added
+- `--xss`: reflect a unique canary + special-char matrix (`<>"'`(){};=/`) through
+  query params; report breakout chars that survive UNESCAPED and classify the
+  context (html-tag / attribute / javascript). HTTP-only — a lead to confirm in a
+  browser, never a claim of execution. In the safe/full profiles.
+- SSRF enrichment: more cloud-metadata targets (Alibaba 100.100.100.200, Oracle
+  OCI, Packet) and a SSRF_BYPASS_PAYLOADS list (decimal/hex/IPv6 loopback,
+  gopher/dict/file schemes) wired into the manual SSRF recipe.
+- Tests for the XSS reflection analyser (tag/attribute/javascript/encoded/absent)
+  and the enriched SSRF data. Suite: 32 tests, green.
+- ARSENAL.md: XSS reflection-matrix + SSRF localhost/scheme bypass recipes.
+
 ## 4.6.0 — unauthenticated-only (login replay removed) (2026)
 
 The v4.5 login machinery was removed by request: this tool now finds everything

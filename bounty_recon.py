@@ -5,6 +5,16 @@ bounty_recon.py — All-in-one Bug Bounty Recon, Scanner & AI Triage
 Version : see VERSION constant below (single source of truth)
 License : MIT
 
+New in v4.7 (reflected-XSS surface + richer SSRF, 2026):
+  ✦ Reflected-XSS surface    — --xss: canary + special-char reflection matrix
+                               (<>"'`(){};=/), context-classified (html/attribute/
+                               javascript), HTTP-only lead — never claims execution
+  ✦ SSRF enriched            — Alibaba/Oracle/Packet metadata targets +
+                               localhost/scheme bypass payloads (decimal/hex/IPv6,
+                               gopher/dict/file) in the manual recipe
+  (XSS idea generalised from XSSRush without a headless browser; SSRF target set
+   broadened from SSRFmap. Both unauthenticated; exploitation stays manual.)
+
 New in v4.6 (unauthenticated-only; login replay removed, 2026):
   ✦ No-login by design       — the scanner sends NO cookies/session/auth; every
                                module is pure unauthenticated black-box discovery
@@ -154,7 +164,7 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-VERSION  = "4.6.0"
+VERSION  = "4.7.0"
 TIMEOUT  = 12
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 BROWSER_HEADERS = {
@@ -458,7 +468,31 @@ CLOUD_METADATA_TARGETS = {
     "GCP":          "http://metadata.google.internal/computeMetadata/v1/",
     "Azure":        "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
     "DigitalOcean": "http://169.254.169.254/metadata/v1/",
+    # v4.7: broadened from SSRFmap's target set
+    "Alibaba Cloud": "http://100.100.100.200/latest/meta-data/",
+    "Oracle OCI":   "http://169.254.169.254/opc/v2/instance/",
+    "GCP (alt host)": "http://169.254.169.254/computeMetadata/v1/",
+    "Packet/Equinix": "http://metadata.packet.net/metadata",
 }
+# GCP/Alibaba/Azure IMDS want a header — surface it in the manual recipe.
+CLOUD_METADATA_HEADERS = {
+    "GCP":   "Metadata-Flavor: Google",
+    "Azure": "Metadata: true",
+}
+
+# ── SSRF localhost / scheme bypass payloads (generalised from SSRFmap) ─────────
+# 127.0.0.1 and 169.254.169.254 written in forms that often slip past naive
+# allow/deny list filters. Used in the manual command hints, not auto-fired.
+SSRF_BYPASS_PAYLOADS = [
+    "http://127.0.0.1", "http://127.1", "http://0.0.0.0", "http://0177.0.0.1",
+    "http://2130706433",            # decimal 127.0.0.1
+    "http://0x7f.0x0.0x0.0x1",      # hex
+    "http://[::1]", "http://[::ffff:127.0.0.1]",
+    "http://localhost#@evil.com", "http://evil.com@127.0.0.1",
+    "http://127.0.0.1.nip.io",
+    "http://169.254.169.254", "http://[fd00:ec2::254]",   # AWS IMDS IPv6
+    "gopher://127.0.0.1:6379/_", "dict://127.0.0.1:11211/", "file:///etc/passwd",
+]
 
 # ── CVE fingerprint checks ────────────────────────────────────────────────────
 CVE_CHECKS = [
@@ -927,6 +961,103 @@ def detect_ssrf_params(base_url: str, ssrf_callback: str = "") -> list:
     return findings
 
 # ── NEW: Open Redirect detection ──────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# v4.7: reflected-XSS surface (HTTP-only canary + special-char reflection matrix)
+# Generalised from XSSRush's reflection/matrix idea, WITHOUT a headless browser:
+# we report where input reflects with dangerous metacharacters unescaped (a
+# strong XSS lead to confirm by hand) — never claim execution. Unauthenticated.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# The probe appends this full matrix, but severity is decided ONLY on the
+# breakout chars below — ';', '=', '/' etc. also appear inside HTML entities
+# (&lt;) and benign markup, so flagging them would be noise.
+XSS_MATRIX_CHARS = "<>\"'`(){};=/"
+XSS_BREAKOUT_CHARS = "<>\"'`"   # the chars that actually enable an XSS breakout
+# Default parameter names to try when a URL carries none of its own.
+XSS_DEFAULT_PARAMS = ["q", "s", "search", "query", "id", "name", "lang", "page",
+                      "redirect", "return", "url", "keyword", "term", "msg", "error"]
+
+
+def xss_matrix_probe(canary: str) -> str:
+    """Build the probe value: a unique canary followed by the metachar matrix."""
+    return canary + XSS_MATRIX_CHARS
+
+
+def analyze_xss_reflection(canary: str, body: str) -> dict:
+    """Decide whether `canary`+matrix reflected, and which metachars survived raw.
+
+    Returns {reflected, unescaped (list), context, severity}. Pure / no I/O.
+    Severity: High if < and > both survive (tag injection), Medium if a quote or
+    backtick survives (attribute/JS breakout), Low if reflected but all encoded.
+    """
+    result = {"reflected": False, "unescaped": [], "context": "none", "severity": None}
+    idx = body.find(canary)
+    if idx == -1:
+        return result
+    result["reflected"] = True
+    window = body[idx + len(canary): idx + len(canary) + len(XSS_MATRIX_CHARS) + 8]
+    unescaped = [c for c in XSS_BREAKOUT_CHARS if c in window]
+    result["unescaped"] = unescaped
+
+    before = body[max(0, idx - 200): idx].lower()
+    in_script = before.rfind("<script") > before.rfind("</script")
+    if "<" in unescaped and ">" in unescaped:
+        result["context"], result["severity"] = ("html-tag", "High")
+    elif in_script and ("\"" in unescaped or "'" in unescaped or "`" in unescaped):
+        result["context"], result["severity"] = ("javascript", "High")
+    elif "\"" in unescaped or "'" in unescaped or "`" in unescaped:
+        result["context"], result["severity"] = ("attribute", "Medium")
+    else:
+        result["context"], result["severity"] = ("encoded", "Low")
+    return result
+
+
+def detect_reflected_xss(base_url: str) -> list:
+    """Reflect a canary through query params and report unescaped metachars.
+
+    Tests the URL's own params, else a small default-name set. HTTP-only: this is
+    an XSS *lead* (reflection + unescaped chars), to be confirmed in a browser.
+    """
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    findings = []
+    parts = urlsplit(base_url)
+    existing = parse_qsl(parts.query, keep_blank_values=True)
+    param_names = [k for k, _ in existing] or XSS_DEFAULT_PARAMS
+    seen = set()
+    for name in param_names:
+        if name in seen:
+            continue
+        seen.add(name)
+        canary = "xsr" + "".join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=6))
+        probe = xss_matrix_probe(canary)
+        q = dict(existing); q[name] = probe
+        test_url = urlunsplit((parts.scheme, parts.netloc, parts.path or "/",
+                               urlencode(q), ""))
+        try:
+            status, hdrs, body = http_get(test_url, timeout=10)
+        except Exception:
+            continue
+        ctype = (hdrs.get("content-type") or hdrs.get("Content-Type") or "").lower()
+        if "html" not in ctype and "xml" not in ctype and ctype:
+            continue  # reflected JSON/text is not an HTML-XSS context
+        analysis = analyze_xss_reflection(canary, body.decode("utf-8", "replace"))
+        if not analysis["reflected"] or analysis["severity"] == "Low":
+            continue
+        findings.append({
+            "severity": analysis["severity"],
+            "category": "xss",
+            "title": f"Reflected input with unescaped metachars ({analysis['context']} context) — likely XSS",
+            "url": test_url,
+            "detail": f"Param '{name}' reflected a canary with unescaped {analysis['unescaped']} "
+                      f"in a {analysis['context']} context. Reflection is a lead, not proof.",
+            "command": f'# confirm execution in a real browser:\n'
+                       f'# {parts.scheme}://{parts.netloc}{parts.path or "/"}?{name}=<svg/onload=alert(1)>',
+            "remediation": "Context-encode output (HTML/attr/JS/URL) and add a strict CSP; "
+                           "prefer framework auto-escaping over manual concatenation.",
+        })
+    return findings
+
+
 def detect_open_redirects(base_url: str) -> list:
     """
     Probe redirect parameters with an evil.com payload.
@@ -3249,6 +3380,8 @@ def main():
     ap.add_argument("--cve",                  action="store_true", help="CVE fingerprint detection")
     ap.add_argument("--cache-poison",         action="store_true", dest="cache_poison", help="Host-override cache-poisoning probe")
     ap.add_argument("--lib-versions",         action="store_true", dest="lib_versions", help="Detect outdated JS libraries (retire.js-lite)")
+    ap.add_argument("--xss",                  action="store_true",
+                    help="Reflected-XSS surface: canary + metachar reflection matrix (HTTP-only lead)")
     ap.add_argument("--access-bypass",        action="store_true", dest="access_bypass",
                     help="On 401/403 endpoints, try path-normalisation (dot-encoding / ..;) + X-Forwarded-* spoofs for a 200")
     ap.add_argument("--tls-downgrade",        action="store_true", dest="tls_downgrade",
@@ -3300,7 +3433,7 @@ def main():
     elif args.profile == "safe":
         for m in ["js","s3","graphql","waf","wayback","param_mine","cve","lib_versions",
                   "open_redirect","idor","lfi_xxe","race","cache_poison","nuclei",
-                  "access_bypass","tls_downgrade"]:
+                  "access_bypass","tls_downgrade","xss"]:
             setattr(args, m, True)
     elif args.profile == "aggressive":
         args.full = True
@@ -3312,7 +3445,7 @@ def main():
         args.ssrf = args.open_redirect = args.ssti = args.proto_pollution = True
         args.race = args.idor = args.lfi_xxe = args.wayback = args.param_mine = True
         args.cve = args.idn = args.cache_poison = args.lib_versions = True
-        args.access_bypass = args.tls_downgrade = True
+        args.access_bypass = args.tls_downgrade = args.xss = True
 
     # Configure the shared HTTP layer (connection pool, rate limit, retries, gate).
     # Unauthenticated by design: no cookies/session/auth headers are ever sent.
@@ -3503,6 +3636,12 @@ def main():
         console.print("\n[bold]12. Open Redirect Detection[/bold]" if HAS_RICH else "\n12. Open Redirect")
         for url in scan_urls[:3]:
             for rf in detect_open_redirects(url): all_findings.append(rf)
+
+    # 12b. Reflected-XSS surface (canary + metachar reflection matrix)
+    if getattr(args, "xss", False):
+        console.print("\n[bold]12b. Reflected-XSS Surface[/bold]" if HAS_RICH else "\n12b. Reflected-XSS Surface")
+        for url in scan_urls[:5]:
+            for xf in detect_reflected_xss(url): all_findings.append(xf)
 
     # 13. SSTI
     if args.ssti:
