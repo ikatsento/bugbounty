@@ -5,14 +5,15 @@ bounty_recon.py — All-in-one Bug Bounty Recon, Scanner & AI Triage
 Version : see VERSION constant below (single source of truth)
 License : MIT
 
-New in v4.5 (authenticated scanning + access-control bypass, 2026):
-  ✦ Authenticated scans      — --cookie / --auth-state (Playwright storageState)
-                               / --header, replayed on every request
-  ✦ Access-control bypass    — on 401/403 endpoints, try %2e/..; path
+New in v4.6 (unauthenticated-only; login replay removed, 2026):
+  ✦ No-login by design       — the scanner sends NO cookies/session/auth; every
+                               module is pure unauthenticated black-box discovery
+  ✦ Access-control bypass    — on 401/403 endpoints, try dot-encoding/..; path
                                normalisation + X-Forwarded-*/X-Original-URL spoofs
+                               (all unauthenticated — no credentials needed)
   ✦ TLS downgrade check      — flag https endpoints that 3xx → cleartext http://
-  (Generalised from an authorised n8n/Next.js engagement; target-specific
-   webhook/SSRF recipes live in ARSENAL.md, not as FP-prone auto-probes.)
+  (Generalised from an authorised engagement; the --cookie/--auth-state/--header
+   login flags from v4.5 were removed — this tool finds everything WITHOUT login.)
 
 New in v4.4 (curated upgrade, 2026):
   ✦ Test suite               — pytest covering the pure logic (JWT, secrets,
@@ -153,7 +154,7 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-VERSION  = "4.5.0"
+VERSION  = "4.6.0"
 TIMEOUT  = 12
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 BROWSER_HEADERS = {
@@ -551,7 +552,6 @@ HTTP_CFG = {
     "timeout":  TIMEOUT,
     "active":   False,  # gate for intrusive (injection) probes
     "verbose":  False,
-    "extra_headers": {},  # auth / custom headers sent on every request
 }
 
 class _RateLimiter:
@@ -583,7 +583,7 @@ _CLIENT = None
 _CLIENT_LOCK = __import__("threading").Lock()
 
 def configure_http(threads=None, rate=None, retries=None, timeout=None, active=None,
-                   verbose=None, extra_headers=None):
+                   verbose=None):
     global _RL
     if threads is not None:  HTTP_CFG["threads"] = max(1, int(threads))
     if rate    is not None:  HTTP_CFG["rate"]    = float(rate)
@@ -591,7 +591,6 @@ def configure_http(threads=None, rate=None, retries=None, timeout=None, active=N
     if timeout is not None:  HTTP_CFG["timeout"] = int(timeout)
     if active  is not None:  HTTP_CFG["active"]  = bool(active)
     if verbose is not None:  HTTP_CFG["verbose"] = bool(verbose)
-    if extra_headers is not None:  HTTP_CFG["extra_headers"] = dict(extra_headers)
     _RL = _RateLimiter(HTTP_CFG["rate"])
 
 def _get_client():
@@ -628,8 +627,6 @@ def http_get(url: str, headers: dict = None, follow: bool = True, timeout: int =
     unrecoverable failure (callers already wrap this in try/except)."""
     timeout = timeout or HTTP_CFG["timeout"]
     h = dict(BROWSER_HEADERS)
-    if HTTP_CFG.get("extra_headers"):
-        h.update(HTTP_CFG["extra_headers"])  # global auth / custom headers
     if headers:
         h.update(headers)
     attempts = HTTP_CFG["retries"] + 1
@@ -2030,53 +2027,10 @@ CACHE_POISON_HEADERS = [
 ]
 
 # ══════════════════════════════════════════════════════════════════════════════
-# v4.5: authenticated scanning + access-control-bypass + TLS downgrade
-# (generalised from an authorised n8n/Next.js engagement — storageState replay,
-#  %2e/..; path-normalisation WAF bypass, X-Forwarded-* spoofing, 307→http)
+# v4.6: unauthenticated access-control-bypass + TLS downgrade
+# (generalised from an authorised engagement — dot-encoding/..; path-normalisation
+#  WAF bypass, X-Forwarded-* spoofing, 307→http. NO login / cookies / session.)
 # ══════════════════════════════════════════════════════════════════════════════
-
-def cookies_from_storage_state(data: dict) -> str:
-    """Playwright storageState JSON -> a 'n=v; n2=v2' Cookie header string.
-
-    Accepts the {"cookies":[{"name","value",...}], "origins":[...]} shape.
-    Returns "" if there are no cookies.
-    """
-    if not isinstance(data, dict):
-        return ""
-    pairs = []
-    for c in data.get("cookies", []) or []:
-        if isinstance(c, dict) and c.get("name"):
-            pairs.append(f"{c['name']}={c.get('value', '')}")
-    return "; ".join(pairs)
-
-
-def parse_header_args(items) -> dict:
-    """['Name: Value', ...] -> {'Name': 'Value'}. Raises ValueError on a bad item."""
-    out = {}
-    for item in items or []:
-        if ":" not in item:
-            raise ValueError(f"bad --header (need 'Name: Value'): {item!r}")
-        name, value = item.split(":", 1)
-        if not name.strip():
-            raise ValueError(f"bad --header (empty name): {item!r}")
-        out[name.strip()] = value.strip()
-    return out
-
-
-def build_auth_headers(cookie: str = None, auth_state_path: str = None,
-                       header_items=None) -> dict:
-    """Assemble the global auth/custom header dict from the CLI auth options."""
-    headers = {}
-    cookie_str = cookie or ""
-    if auth_state_path:
-        with open(auth_state_path, encoding="utf-8") as fh:
-            cookie_str = (cookie_str + "; " if cookie_str else "") + \
-                cookies_from_storage_state(json.load(fh))
-    if cookie_str:
-        headers["Cookie"] = cookie_str
-    headers.update(parse_header_args(header_items))
-    return headers
-
 
 def path_bypass_variants(path: str) -> list:
     """Path-normalisation mutations used to bypass edge/WAF path ACLs.
@@ -3300,12 +3254,6 @@ def main():
     ap.add_argument("--tls-downgrade",        action="store_true", dest="tls_downgrade",
                     help="Flag https endpoints that 3xx-redirect to cleartext http://")
     ap.add_argument("--full",                 action="store_true", help="Enable ALL optional modules")
-    # ── v4.5: authenticated scanning (cookie / Playwright storageState / headers) ─
-    ap.add_argument("--cookie",               help="Cookie header sent on every request, e.g. 'sid=...; csrf=...'")
-    ap.add_argument("--auth-state",           dest="auth_state",
-                    help="Playwright storageState JSON file; its cookies are replayed on every request")
-    ap.add_argument("--header",               action="append", default=[], dest="headers", metavar="'Name: Value'",
-                    help="Extra header on every request (repeatable), e.g. --header 'Authorization: Bearer ...'")
     # ── v4.0: profiles, concurrency, safety gate, output ──────────────────────
     ap.add_argument("--profile",              choices=["passive","safe","aggressive"], default=None,
                     help="passive=read-only recon; safe=+non-destructive probes; aggressive=+injection/active (implies --active)")
@@ -3366,20 +3314,10 @@ def main():
         args.cve = args.idn = args.cache_poison = args.lib_versions = True
         args.access_bypass = args.tls_downgrade = True
 
-    # Authenticated scanning: build the global cookie/header set once.
-    try:
-        _auth_headers = build_auth_headers(args.cookie, args.auth_state, args.headers)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        sys.exit(1)
-    if _auth_headers:
-        which = [k for k in _auth_headers]
-        print(f"🔐 Authenticated scan: sending {', '.join(which)} on every request")
-
-    # Configure the shared HTTP layer (connection pool, rate limit, retries, gate)
+    # Configure the shared HTTP layer (connection pool, rate limit, retries, gate).
+    # Unauthenticated by design: no cookies/session/auth headers are ever sent.
     configure_http(threads=args.threads, rate=args.rate, retries=args.retries,
-                   timeout=args.timeout, active=args.active, verbose=args.verbose,
-                   extra_headers=_auth_headers)
+                   timeout=args.timeout, active=args.active, verbose=args.verbose)
 
     domain   = args.target.replace("https://","").replace("http://","").split("/")[0]
     base_url = args.url or f"https://{domain}"

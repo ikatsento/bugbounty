@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.6.0 — unauthenticated-only (login replay removed) (2026)
+
+The v4.5 login machinery was removed by request: this tool now finds everything
+**without login**. No cookies, session or auth headers are ever sent.
+
+Removed
+- `--cookie`, `--auth-state` (Playwright storageState) and `--header` flags.
+- `build_auth_headers`, `cookies_from_storage_state`, `parse_header_args` and the
+  `HTTP_CFG["extra_headers"]` / `configure_http(extra_headers=...)` plumbing.
+
+Kept (all unauthenticated)
+- `--access-bypass`: 401/403 path-normalisation + trusted-proxy header spoofs.
+- `--tls-downgrade`: https → cleartext http:// redirect detection.
+- The unauthenticated sensitive/internal endpoint sweep (/rest/settings,
+  /api/v1/stream/demo, /actuator, /metrics, …) — unchanged.
+
+Tests
+- Dropped the auth-helper tests; added a regression guard that the login
+  machinery stays gone. Suite: 24 tests, green.
+
 ## 4.5.0 — authenticated scanning + access-control bypass (2026)
 
 Generalised (no target-specific code) from an authorised n8n/Next.js engagement.

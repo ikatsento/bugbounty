@@ -23,9 +23,11 @@ def test_help_exits_zero_and_lists_new_flags():
     proc = _run("--help")
     assert proc.returncode == 0, proc.stderr[-800:]
     out = proc.stdout
-    for flag in ("--cookie", "--auth-state", "--access-bypass",
-                 "--tls-downgrade", "--sarif", "--header"):
+    for flag in ("--access-bypass", "--tls-downgrade", "--sarif"):
         assert flag in out, f"{flag} missing from --help"
+    # login flags were removed in v4.6 (unauthenticated-only tool)
+    for gone in ("--cookie", "--auth-state"):
+        assert gone not in out, f"{gone} should have been removed"
 
 
 def test_no_target_errors_cleanly():
