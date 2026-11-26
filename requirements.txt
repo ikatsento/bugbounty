@@ -1,10 +1,12 @@
-# Core (strongly recommended)
+# ── Core (strongly recommended) ──────────────────────────────────────────────
 httpx[http2]>=0.27
 dnspython>=2.6
 rich>=13.7
 
-# AI triage / hunter (optional — only if you use claude_hunter.py)
+# ── Optional: AI triage (--ai-triage / --ai-plan with the Anthropic provider) ─
+# Ollama (local) and Groq need no package — only ANTHROPIC uses this SDK.
 anthropic>=0.40
 
-# Dynamic crawl (optional — only if you use --playwright)
+# ── Optional: dynamic crawl (--playwright) ───────────────────────────────────
+# Also run once after install:  playwright install chromium
 playwright>=1.47

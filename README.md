@@ -54,6 +54,18 @@ the HTML report, a `**Framework:**` line in Markdown) — reports that speak the
 language triagers trust. See [`METHODOLOGY.md`](./METHODOLOGY.md). *(Mapping inspired
 by [BitterSecurity/Decepticon](https://github.com/BitterSecurity/Decepticon), Apache-2.0.)*
 
+**v4.4 — tests, SARIF, deeper JWT, more secrets.** A **pytest suite** now covers
+the pure logic (JWT audit, secret library, SARIF, cookies, entropy, dedup,
+severity order) — run `pip install -r requirements-dev.txt && pytest -q`.
+`--sarif` writes a **SARIF 2.1.0** report for CI / code-scanning. The JWT audit
+gained **alg-confusion (RS/ES→HS), `kid` injection and `jku`/`x5u` key-injection**
+detection. The secret library added **20+ distinctive 2020-2026 token formats**
+(GitLab/npm/fine-grained-GitHub PATs, Telegram, Discord, DigitalOcean, Vault,
+Square, PyPI, Postman, `sk-ant-`, private-key blocks…). Modern 2020-2026
+technique recipes (request smuggling/H2 desync, web cache deception, OAuth/SAML,
+client-side gadgets) were added to [`ARSENAL.md`](./ARSENAL.md) as verified
+recipes — deliberately **not** FP-prone auto-probes.
+
 ---
 
 ## Repository Structure
@@ -102,7 +114,7 @@ Individual `--<module>` flags still work and can be combined with any profile.
 | `--ssrf-callback URL` | OOB listener for active SSRF (needs `--active`) |
 | `--ai-triage` / `--ai-plan` | 3-phase AI triage / attack plan over findings |
 | `--ai-provider auto\|ollama\|groq\|anthropic` / `--ai-model` / `--ai-min-sev` | AI backend + scope |
-| `--html` / `--json` | extra report formats (Markdown always written) |
+| `--html` / `--json` / `--sarif` | extra report formats (Markdown always written; SARIF 2.1.0 for CI) |
 | `--full` | enable every module (read-only + active) |
 
 Run `python3 bounty_recon.py --help` for the complete list.

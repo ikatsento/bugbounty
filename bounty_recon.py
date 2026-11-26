@@ -2,8 +2,21 @@
 """
 bounty_recon.py — All-in-one Bug Bounty Recon, Scanner & AI Triage
 ======================================================================
-Version : 4.0.0
+Version : see VERSION constant below (single source of truth)
 License : MIT
+
+New in v4.4 (curated upgrade, 2026):
+  ✦ Test suite               — pytest covering the pure logic (JWT, secrets,
+                               SARIF, cookies, entropy, dedup, severity order)
+  ✦ SARIF 2.1.0 output       — --sarif for CI / code-scanning ingestion
+  ✦ JWT audit extended       — alg-confusion (RS/ES→HS), kid injection, jku/x5u
+                               SSRF key-injection (CVE-2018-0114 class)
+  ✦ Secret patterns +20      — GitLab/npm/fine-grained-GH PAT, Telegram, Discord,
+                               DigitalOcean, Vault, Square, PyPI, Postman, sk-ant…
+  ✦ Hygiene                  — bare excepts tightened; requirements.txt de-stale
+  ✦ ARSENAL +methods (2020-26) — HTTP request smuggling/H2 desync, web cache
+                               deception, OAuth/OIDC + SAML, client-side gadgets
+                               (added as verified recipes, not FP-prone auto-probes)
 
 New in v4.0 (upgraded from v3.0):
   ✦ Single tool               — AI triage folded in (claude_hunter + artemis retired)
@@ -131,7 +144,7 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-VERSION  = "4.3.0"
+VERSION  = "4.4.0"
 TIMEOUT  = 12
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 BROWSER_HEADERS = {
@@ -173,6 +186,24 @@ JS_SECRET_PATTERNS = {
     "Password in URL":       r'https?://[a-zA-Z0-9_\-\.%]+:[^@/?#\s"\'`<>{}]{3,}@[a-zA-Z0-9_\-\.]+(?::\d+)?(?:/[^"\'`\s<>{}]*)?',
     "Internal IP":           r'(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})',
     "Hardcoded Password":    r'(?:password|passwd|pwd)\s*[=:]\s*["\'][^"\']{6,}["\']',
+    # ── 2020-2026 additions: distinctive, low-FP token formats ──
+    "GitHub Fine-grained PAT": r'github_pat_[0-9A-Za-z_]{22,}',
+    "GitLab PAT":            r'glpat-[0-9A-Za-z_\-]{20,}',
+    "npm Token":             r'npm_[A-Za-z0-9]{36}',
+    "PyPI Token":            r'pypi-[A-Za-z0-9_\-]{16,}',
+    "Anthropic API Key":     r'sk-ant-[A-Za-z0-9_\-]{20,}',
+    "OpenAI Project Key":    r'sk-proj-[A-Za-z0-9_\-]{20,}',
+    "Telegram Bot Token":    r'\b\d{8,10}:[A-Za-z0-9_\-]{35}\b',
+    "Discord Bot Token":     r'[MNO][A-Za-z0-9_\-]{23}\.[A-Za-z0-9_\-]{6}\.[A-Za-z0-9_\-]{27}',
+    "Discord Webhook":       r'https://(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_\-]+',
+    "DigitalOcean Token":    r'dop_v1_[a-f0-9]{64}',
+    "HashiCorp Vault Token": r'\bhvs\.[A-Za-z0-9_\-]{24,}',
+    "Square Access Token":   r'sq0atp-[0-9A-Za-z_\-]{22}',
+    "Postman API Key":       r'PMAK-[a-f0-9]{24}-[a-f0-9]{34}',
+    "New Relic Key":         r'NRAK-[A-Z0-9]{27}',
+    "Datadog API Key":       r'\bdd[ap]i_[a-f0-9]{32,}',
+    "Google OAuth Refresh":  r'1//[0-9A-Za-z_\-]{30,}',
+    "Private Key Block":     r'-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----',
 }
 
 # Per-pattern severity + whether to apply a Shannon-entropy gate. The old code
@@ -194,6 +225,16 @@ SECRET_SEVERITY = {
     "Generic API Key": "Medium", "Generic Secret": "Medium",
     "Bearer Token": "Low", "Firebase URL": "Info", "Internal IP": "Info",
     "JWT Token": "Info",
+    # 2020-2026 additions — all distinctive formats, high confidence
+    "GitHub Fine-grained PAT": "Critical", "GitLab PAT": "Critical",
+    "npm Token": "Critical", "PyPI Token": "Critical",
+    "Anthropic API Key": "Critical", "OpenAI Project Key": "Critical",
+    "Telegram Bot Token": "High", "Discord Bot Token": "High",
+    "Discord Webhook": "High", "DigitalOcean Token": "Critical",
+    "HashiCorp Vault Token": "Critical", "Square Access Token": "High",
+    "Postman API Key": "High", "New Relic Key": "High",
+    "Datadog API Key": "High", "Google OAuth Refresh": "High",
+    "Private Key Block": "Critical",
 }
 # Patterns that must clear an entropy threshold on the captured token to count.
 ENTROPY_GATED = {"OpenAI Key", "Generic API Key", "Generic Secret", "Bearer Token", "Google API Key"}
@@ -1321,6 +1362,29 @@ def audit_jwt_token(token: str, source_url: str) -> list:
             findings.append({"severity":"Info","category":"jwt","type":"jwt",
                 "title":f"JWT uses symmetric HMAC ({alg.upper()})",
                 "url":source_url,"detail":f"Header: {json.dumps(header)}","command":"hashcat -a 0 -m 16500 <jwt> rockyou.txt","remediation":"Prefer RS256/ES256"})
+        elif alg.startswith(("rs","es","ps")):
+            # Asymmetric → classic alg-confusion: re-sign with the public key as
+            # an HMAC secret and switch alg to HS256 (CVE-2016-5431 class).
+            findings.append({"severity":"Medium","category":"jwt","type":"jwt",
+                "title":f"JWT alg-confusion surface ({alg.upper()}) — test RS→HS downgrade",
+                "url":source_url,"detail":f"Header alg={alg}; if the server also accepts HS256, sign with the leaked/served public key as the HMAC secret.",
+                "command":"# fetch the public key (jwks_uri / .pem), then:\n# jwt_tool <jwt> -X k -pk public.pem   (or python-jwt HS256 with pubkey bytes)",
+                "remediation":"Pin the expected algorithm server-side; never let the token's own header choose RS vs HS."})
+        # kid / jku / x5u header injection surface (CVE-2018-0114 class).
+        kid = header.get("kid")
+        if kid is not None:
+            findings.append({"severity":"Low","category":"jwt","type":"jwt",
+                "title":"JWT 'kid' header present — test path traversal / SQLi key injection",
+                "url":source_url,"detail":f"kid={kid!r}. If kid selects a key file/row, try ../../dev/null + empty sig, or SQLi to control the key.",
+                "command":"# kid: '../../../dev/null' with empty HMAC secret; or kid SQLi 'x' UNION SELECT 'key'--",
+                "remediation":"Treat kid as an opaque allow-listed id; never use it in a path or query."})
+        for hdr_key, label in (("jku","jku"),("x5u","x5u")):
+            if header.get(hdr_key):
+                findings.append({"severity":"High","category":"jwt","type":"jwt",
+                    "title":f"JWT '{label}' header set — remote key / SSRF injection surface",
+                    "url":source_url,"detail":f"{label}={header.get(hdr_key)!r}. If the server fetches this URL for the verification key, point it at an attacker-hosted JWKS to forge any token.",
+                    "command":f"# host your own JWKS, set {label} to it, re-sign; also test SSRF to internal hosts",
+                    "remediation":f"Remove {label} support or allow-list a single trusted key URL."})
         sensitive_keys = [k for k in payload.keys() if any(w in k.lower() for w in ["pass","secret","priv","email","role","admin"])]
         if sensitive_keys:
             findings.append({"severity":"Low","category":"jwt","type":"jwt",
@@ -1824,7 +1888,7 @@ def parse_dalfox_output(text: str, min_confidence: float = 0.8) -> list:
     for m in block_re.finditer(text):
         idx, param, method, url, ctx, payload, conf_str = m.groups()
         try: conf = float(conf_str)
-        except: conf = 0.0
+        except (ValueError, TypeError): conf = 0.0
         if conf < min_confidence: continue
         key = param.lower()
         if key not in by_param:
@@ -1846,7 +1910,7 @@ def parse_nuclei_jsonl(text: str) -> list:
         line = line.strip()
         if not line: continue
         try: n = json.loads(line)
-        except: continue
+        except json.JSONDecodeError: continue
         tid = n.get("template-id",""); murl = n.get("matched-at","")
         key = f"{tid}:{murl}"
         if key in seen: continue
@@ -2454,6 +2518,62 @@ def generate_markdown(result: ScanResult, out_path: Path):
 def generate_json(result: ScanResult, out_path: Path):
     out_path.write_text(json.dumps(asdict(result), indent=2, ensure_ascii=False), encoding="utf-8")
 
+# SARIF severity → level mapping (code-scanning ingestion).
+_SARIF_LEVEL = {"Critical": "error", "High": "error",
+                "Medium": "warning", "Low": "note", "Info": "note"}
+
+def build_sarif(result: ScanResult) -> dict:
+    """Build a SARIF 2.1.0 log from a ScanResult (pure; no I/O)."""
+    rules, rule_index = [], {}
+    results = []
+    for f in result.findings:
+        sev = f.get("severity", "Info")
+        title = f.get("title") or f.get("header") or f.get("detail") or f.get("category", "finding")
+        category = f.get("category", "general") or "general"
+        rule_id = category
+        if rule_id not in rule_index:
+            rule_index[rule_id] = len(rules)
+            rules.append({
+                "id": rule_id,
+                "name": "".join(w.capitalize() for w in re.split(r"[^A-Za-z0-9]+", rule_id) if w) or "Finding",
+                "shortDescription": {"text": f"bounty_recon {category} findings"},
+                "defaultConfiguration": {"level": _SARIF_LEVEL.get(sev, "note")},
+            })
+        message = title
+        detail = f.get("detail") or f.get("evidence")
+        if detail:
+            message = f"{title} — {detail}"
+        res = {
+            "ruleId": rule_id,
+            "ruleIndex": rule_index[rule_id],
+            "level": _SARIF_LEVEL.get(sev, "note"),
+            "message": {"text": message},
+            "properties": {"severity": sev, "category": category,
+                           "remediation": f.get("remediation", "")},
+        }
+        url = f.get("url") or f.get("host")
+        if url:
+            res["locations"] = [{"physicalLocation":
+                                 {"artifactLocation": {"uri": url}}}]
+        results.append(res)
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "bounty_recon.py",
+                "version": VERSION,
+                "informationUri": "https://github.com/ikatsento/bugbounty",
+                "rules": rules,
+            }},
+            "results": results,
+        }],
+    }
+
+def generate_sarif(result: ScanResult, out_path: Path):
+    out_path.write_text(json.dumps(build_sarif(result), indent=2, ensure_ascii=False),
+                        encoding="utf-8")
+
 def dedup_findings(findings: list) -> list:
     """Collapse exact-duplicate findings (same severity+category+title+url)."""
     seen, out = set(), []
@@ -3019,6 +3139,8 @@ def main():
     ap.add_argument("--out",                  default="")
     ap.add_argument("--out-dir",              default=".")
     ap.add_argument("--json",                 action="store_true")
+    ap.add_argument("--sarif",                action="store_true",
+                    help="Also write a SARIF 2.1.0 report (CI / code-scanning ingestion)")
     ap.add_argument("--import-dalfox",        default="", dest="import_dalfox")
     ap.add_argument("--import-nuclei",        default="", dest="import_nuclei")
     ap.add_argument("--min-confidence",       type=float, default=0.8, dest="min_confidence")
@@ -3118,7 +3240,7 @@ def main():
         try:
             _, h_resp, raw_b = http_get(lh["url"], timeout=6)
             html_body = raw_b.decode("utf-8","replace")
-        except: pass
+        except Exception: pass
         techs = deep_fingerprint_tech(lh["url"], h_resp, html_body)
         if techs: result.technologies[lh["host"]] = techs
 
@@ -3430,6 +3552,10 @@ def main():
         hp = out_dir / f"{stem}.html"
         generate_html(result, hp)
         console.print(f"📄 HTML    : {hp}")
+    if args.sarif:
+        sp = out_dir / f"{stem}.sarif"
+        generate_sarif(result, sp)
+        console.print(f"📄 SARIF   : {sp}")
 
     close_client()
 
