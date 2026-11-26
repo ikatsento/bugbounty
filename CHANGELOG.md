@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.8.0 — access-bypass false-positive hardening (2026)
+
+Found while running v4.7 against a live Cloudflare+F5 target: `--access-bypass`
+flagged `/%2e/` as a High, but it was an F5/BIG-IP WAF block page served with
+HTTP 200 ("The requested URL was rejected"), not a real bypass.
+
+Fixed
+- `--access-bypass` now RE-CONFIRMS a candidate on a second request (baseline must
+  still deny AND the variant must still grant) — suppresses transient CDN/edge 200s
+  and unstable boundaries.
+- A 200 whose body is a WAF/block/login/challenge page (403/401 text, F5 "Request
+  Rejected", "consult with your administrator", "support id", "web application
+  firewall", …) is no longer treated as access — new `looks_like_access_denied`
+  guard + minimum-length + distinct-from-baseline checks.
+- Tests: `looks_like_access_denied`, `_candidate_bypass` FP shapes (incl. the exact
+  live F5 page). Suite: 34 tests, green. Verified 0 findings on the live host.
+
 ## 4.7.0 — reflected-XSS surface + richer SSRF (2026)
 
 Attack-surface techniques from XSSRush (N45HT) and SSRFmap (swisskyrepo),

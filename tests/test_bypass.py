@@ -38,6 +38,31 @@ def test_header_bypass_sets_are_single_header_dicts():
     assert "X-Forwarded-For" in names and "X-Original-URL" in names
 
 
+# ── v4.8: access-bypass false-positive guards ───────────────────────────────
+def test_looks_like_access_denied():
+    assert b.looks_like_access_denied("<title>403 Forbidden</title>") is True
+    assert b.looks_like_access_denied("Attention Required! | Cloudflare") is True
+    assert b.looks_like_access_denied("<h1>Welcome to your dashboard</h1>") is False
+    # F5/BIG-IP WAF block page served with HTTP 200 (the live bmsstatic FP)
+    assert b.looks_like_access_denied(
+        "<title>Request Rejected</title>The requested URL was rejected. "
+        "Please consult with your administrator.") is True
+
+
+def test_candidate_bypass_rejects_fp_shapes():
+    base = b"<html><title>403 Forbidden</title></html>"
+    # identical to the denied baseline -> not a bypass (the /%2e/ live FP)
+    assert b._candidate_bypass(200, base, base) is False
+    # a 200 that is itself a forbidden page -> not a bypass
+    assert b._candidate_bypass(200, b"<title>403 Forbidden</title>" + b"x" * 200, base) is False
+    # tiny body -> not real access
+    assert b._candidate_bypass(200, b"ok", base) is False
+    # non-2xx -> not a bypass
+    assert b._candidate_bypass(403, b"x" * 500, base) is False
+    # distinct, substantial, non-error 200 -> genuine candidate
+    assert b._candidate_bypass(200, b"<h1>Admin panel</h1>" + b"y" * 300, base) is True
+
+
 # ── regression guard: the login machinery must stay gone ─────────────────────
 def test_no_login_machinery_remains():
     for removed in ("build_auth_headers", "cookies_from_storage_state",
