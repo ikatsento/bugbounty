@@ -77,7 +77,21 @@ Two unauthenticated checks, generalised from an authorised engagement, remain:
   200 (confirm by hand). No credentials needed — it tests whether the edge/origin
   ACL can be tricked.
 - **`--tls-downgrade`** — flags https endpoints that 3xx-redirect to cleartext
-  `http://`. Both are in the `safe`/`full` profiles. 24 tests, green.
+  `http://`. Both are in the `safe`/`full` profiles.
+
+**v4.7 — reflected-XSS surface + richer SSRF.** Attack-surface techniques drawn
+from [XSSRush](https://github.com/N45HT/XSSRush) and
+[SSRFmap](https://github.com/swisskyrepo/SSRFmap), re-implemented to fit the
+unauthenticated, no-browser design:
+- **`--xss`** — reflects a unique canary plus a special-character matrix
+  (`<>"'`` ` ``(){};=/`) through query params, then reports which **breakout
+  chars survive unescaped** and classifies the context (`html-tag` / `attribute`
+  / `javascript`). HTTP-only, so it's an XSS **lead to confirm in a browser** —
+  it never claims execution (no false "alert fired"). In the `safe`/`full` profiles.
+- **Richer SSRF** — the cloud-metadata target set grew (Alibaba `100.100.100.200`,
+  Oracle OCI, Packet) and a `SSRF_BYPASS_PAYLOADS` list (decimal/hex/IPv6
+  loopback, `gopher://`/`dict://`/`file://`) now feeds the manual SSRF recipe.
+  32 tests, green.
 
 ---
 
@@ -129,6 +143,7 @@ Individual `--<module>` flags still work and can be combined with any profile.
 | `--ai-provider auto\|ollama\|groq\|anthropic` / `--ai-model` / `--ai-min-sev` | AI backend + scope |
 | `--html` / `--json` / `--sarif` | extra report formats (Markdown always written; SARIF 2.1.0 for CI) |
 | `--access-bypass` / `--tls-downgrade` | unauthenticated: 401/403 path-norm + header-spoof bypass; https→http downgrade detection |
+| `--xss` | reflected-XSS surface: canary + metachar reflection matrix, context-classified (HTTP-only lead) |
 | `--full` | enable every module (read-only + active) |
 
 Run `python3 bounty_recon.py --help` for the complete list.
