@@ -5,6 +5,15 @@ bounty_recon.py — All-in-one Bug Bounty Recon, Scanner & AI Triage
 Version : see VERSION constant below (single source of truth)
 License : MIT
 
+New in v4.10 (false-positive fixes found on a live target, 2026):
+  ✦ CVE fingerprint          — ignore 3xx redirects and strip the echoed request
+                               path from HEADERS too, so a 308 to '/moveit/' no
+                               longer "matches" MOVEit via its Location header
+  ✦ S3 verdict               — a private (403) bucket is reported "not reportable",
+                               not "✅ EXPLOITABLE"; only public reads are exploitable
+  (Both caught running v4.8 --full against a live Cloudflare/Next.js host that
+   308-redirects every path; see tests/test_cve_s3_fp.py.)
+
 New in v4.9 (AI deep-analysis / gap review, 2026):
   ✦ --ai-analyze            — feeds the WHOLE scan (hosts, tech, endpoints, params,
                               findings) to the AI, which reasons about what the
@@ -181,7 +190,7 @@ except ImportError:
     HAS_PLAYWRIGHT = False
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-VERSION  = "4.9.0"
+VERSION  = "4.10.0"
 TIMEOUT  = 12
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 BROWSER_HEADERS = {
@@ -2126,6 +2135,12 @@ def check_cve_fingerprints(base_url: str) -> list:
             # 1) reject hard error / not-found statuses outright
             if status in (404, 410) or status >= 500:
                 continue
+            # 1b) reject 3xx redirects: a product page is a 200 (or a 401/403
+            #     login), never a redirect. A 308/301 to add a trailing slash puts
+            #     the requested path in the Location header, which otherwise makes
+            #     '/moveit/' 'match' MOVEit. (Fixed the v4.8 cody.fluttercee FP.)
+            if 300 <= status < 400:
+                continue
 
             decoded = body[:8000].decode("utf-8", errors="replace").lower()
             sig = _norm_body(body)
@@ -2137,16 +2152,16 @@ def check_cve_fingerprints(base_url: str) -> list:
             if _ERROR_BODY_RE.search(decoded):
                 continue
 
-            # 4) strip the echoed request path so path-echo can't match keywords
+            # 4) strip the echoed request path so path-echo can't match keywords —
+            #    from BODY *and* headers (e.g. a reflected Location: /moveit/).
             variants = {path.lower(), unquote(path).lower()}
             variants |= {seg for p in list(variants) for seg in re.split(r"[/_.\-]", p) if len(seg) > 3}
-            stripped = decoded
-            for v in sorted(variants, key=len, reverse=True):
-                if v:
-                    stripped = stripped.replace(v, " ")
             h = norm_headers(hdrs)
             header_str = " ".join(f"{k}: {v}" for k, v in h.items()).lower()
-            text = stripped + " " + header_str
+            text = decoded + " " + header_str
+            for v in sorted(variants, key=len, reverse=True):
+                if v:
+                    text = text.replace(v, " ")
 
             # 5) match keywords with word boundaries (no substring bleed)
             for keyword in check["match"]:
@@ -2628,10 +2643,16 @@ def exploitation_for(f: dict, domain: str) -> dict:
              "Host a proof page; screenshot your content served on the victim subdomain."])
 
     if cat == "s3":
-        return _exp("yes", "Public cloud bucket read (and sometimes write) — data disclosure / content injection.",
-            [f'aws s3 ls s3://<bucket> --no-sign-request',
-             "aws s3 cp s3://<bucket>/<object> . --no-sign-request   # prove read",
-             "Test write: aws s3 cp evil.txt s3://<bucket>/ --no-sign-request (only if write is in scope)."])
+        det = (f.get("detail") or "").lower()
+        # A private (403) bucket is NOT exploitable — only flag public reads.
+        if "publicly readable" in det or f.get("severity") == "Critical":
+            return _exp("yes", "Public cloud bucket read (and sometimes write) — data disclosure / content injection.",
+                [f'aws s3 ls s3://<bucket> --no-sign-request',
+                 "aws s3 cp s3://<bucket>/<object> . --no-sign-request   # prove read",
+                 "Test write: aws s3 cp evil.txt s3://<bucket>/ --no-sign-request (only if write is in scope)."])
+        return _exp("no", "Bucket name resolves but access is denied (403) — the bucket is private. "
+                          "Informational: confirms naming, not a standalone bug.",
+            ["Re-test periodically / with other regions; only reportable if it becomes readable or writable."])
 
     if cat == "cache-poison":
         return _exp("manual", "Persistent XSS/redirect served to other users via the shared cache.",

@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.10.0 — false-positive fixes found on a live target (2026)
+
+Running v4.8 `--full` against a live Cloudflare/Next.js host (that 308-redirects
+every path) produced 2 Critical + 2 High CVE findings and "EXPLOITABLE" S3 rows —
+all false positives. Fixed both classes.
+
+Fixed
+- CVE fingerprint: ignore 3xx redirects (a product page is a 200/401/403, not a
+  redirect) AND strip the echoed request path from the response HEADERS, not just
+  the body — a 308 to `/moveit/` was matching "MOVEit" via its `Location` header.
+- S3: a private (403) bucket now gets verdict "no" (not reportable / informational),
+  not "✅ EXPLOITABLE". Only a publicly readable (200/Critical) bucket is exploitable.
+- Tests (offline, http_get monkeypatched): 308 path-echo is suppressed, a real 200
+  product still fingerprints, and the S3 public/private verdicts. Suite: 41 green.
+
 ## 4.9.0 — AI deep-analysis / gap review (2026)
 
 Inspired (concept only — no AGPL code) by autonomous-pentest frameworks: let the
